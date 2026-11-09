@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import dayjs from 'dayjs';
+import { useElementSize } from '@vueuse/core';
 import type { EChartsCoreOption } from 'echarts/core';
 import {
   CHART_AXIS_LINE_COLOR,
   CHART_LINE_BLUE,
-  CHART_LINE_PURPLE,
+  CHART_LINE_YELLOW,
   CHART_SPLIT_LINE_COLOR,
   CHART_TEXT_COLOR,
 } from '../../../../common/constants/chart.constants.ts';
@@ -25,7 +26,8 @@ import BaseTabs from '../../ui/BaseTabs.vue';
  * 投资账本 · 资产曲线（queryPnlSummary）
  *
  * - 左轴净值指数（基点 1000），沪深300 / 上证按首点归一化对比；
- * - 开关「仓位变化」：右轴 0~100% 紫色虚线（双 y 轴）；
+ * - 开关「仓位变化」：仓位移出主图，下方副图（K线主图+副图样式）按 3:1 高度比
+ *   绘制黄色面积图，右轴 0~100%（王总 2026-11-09 定稿）；
  * - 开关「最大回撤」：净值曲线下方渲染黄色半透明背景（王总 2026-10-23 定稿：
  *   染色画在曲线下方，黄色；不再用峰值差 stack 填充）；
  * - 区间为受控状态（父级持有），切换时 emit 给父级重拉 queryPnlSummary——
@@ -184,6 +186,30 @@ const activityText = (i: number): string => {
   return parts.join(' · ');
 };
 
+/** 主图 / 仓位副图高度比（主图:副图 = 3:1，K线主图+副图样式，王总 2026-11-09 定稿） */
+const PANE_RATIO = 3;
+
+/** 主图顶部留白（px） */
+const PANE_TOP_PAD = 12;
+
+/** 主图与副图间距（px） */
+const PANE_GAP = 14;
+
+/** 副图底部 x 轴标签区高度（px） */
+const PANE_BOTTOM_PAD = 22;
+
+/** 副图最小高度（px，容器极矮时保底可读） */
+const PANE_SUB_MIN = 30;
+
+/** 容器高度兜底（px，首帧未量到尺寸时按此切分） */
+const CHART_BOX_FALLBACK_HEIGHT = 320;
+
+/** 图表容器（量实高后按 3:1 精确切分主图 / 副图两个 grid） */
+const chartBox = ref<HTMLDivElement | null>(null);
+
+/** 容器实高（px） */
+const { height: boxH } = useElementSize(chartBox);
+
 const option = computed<EChartsCoreOption>(() => {
   void settingsStore.trendTheme;
   const { dates, navVals, hs300Vals, shVals, posVals } = trend0.value;
@@ -197,7 +223,7 @@ const option = computed<EChartsCoreOption>(() => {
       data: navVals,
       symbol: 'none',
       lineStyle: { width: 0, opacity: 0 },
-      areaStyle: { color: '#f59e0b', opacity: 0.15 },
+      areaStyle: { color: CHART_LINE_YELLOW, opacity: 0.15 },
       tooltip: { show: false },
       silent: true,
       z: 0,
@@ -226,39 +252,58 @@ const option = computed<EChartsCoreOption>(() => {
       type: 'line',
       data: shVals,
       symbol: 'none',
-      lineStyle: { color: '#f59e0b', width: 1.4 },
-      itemStyle: { color: '#f59e0b' },
+      lineStyle: { color: CHART_LINE_YELLOW, width: 1.4 },
+      itemStyle: { color: CHART_LINE_YELLOW },
     },
   );
-  if (posOn.value) {
+
+  // 仓位副图开启：主图 / 副图双 grid 按 3:1 切分容器实高（K线主图+副图样式），
+  // 仓位画成副图紫色面积图；关闭时回到原单 grid 布局
+  const subOn = posOn.value;
+  const boxHeight = boxH.value > 0 ? boxH.value : CHART_BOX_FALLBACK_HEIGHT;
+  const plotHeight = boxHeight - PANE_TOP_PAD - PANE_BOTTOM_PAD - (subOn ? PANE_GAP : 0);
+  const subHeight = subOn ? Math.max(PANE_SUB_MIN, Math.round(plotHeight / (PANE_RATIO + 1))) : 0;
+  const mainHeight = plotHeight - subHeight;
+
+  if (subOn) {
     series.push({
       name: '仓位',
       type: 'line',
       data: posVals,
+      xAxisIndex: 1,
       yAxisIndex: 1,
       symbol: 'none',
-      lineStyle: { color: CHART_LINE_PURPLE, width: 1.5, type: 'dashed' },
-      itemStyle: { color: CHART_LINE_PURPLE },
+      lineStyle: { color: CHART_LINE_YELLOW, width: 1.2 },
+      itemStyle: { color: CHART_LINE_YELLOW },
+      areaStyle: { color: CHART_LINE_YELLOW, opacity: 0.15 },
     });
   }
 
   return {
-    grid: { left: 44, right: 44, top: 18, bottom: 24 },
+    grid: subOn
+      ? [
+          { left: 44, right: 44, top: PANE_TOP_PAD, height: mainHeight },
+          { left: 44, right: 44, top: PANE_TOP_PAD + mainHeight + PANE_GAP, height: subHeight },
+        ]
+      : { left: 44, right: 44, top: 18, bottom: 24 },
     tooltip: {
       trigger: 'axis',
       axisPointer: { type: 'line' },
       formatter: (params: unknown) => {
         const list = Array.isArray(params) ? params : [params];
-        const date = (list[0] as { axisValue?: string } | undefined)?.axisValue ?? '';
+        const first = list[0] as { axisValue?: string; dataIndex?: number } | undefined;
+        const date = first?.axisValue ?? '';
+        const i = first?.dataIndex ?? -1;
+        // 主图 / 副图共用同一条日期轴，按 dataIndex 直取另一幅的值，悬停任一幅都给全量
+        const lines = [`<b>${date}</b>`];
+        if (i >= 0 && navVals[i] !== undefined) lines.push(`净值指数 ${navVals[i]}`);
+        if (i >= 0 && subOn && posVals[i] !== undefined) {
+          lines.push(`<span style="color:${CHART_LINE_YELLOW}">仓位 ${posVals[i]}%</span>`);
+        }
         const pick = (name: string): string | null => {
           const hit = list.find((p) => (p as { seriesName?: string }).seriesName === name);
           return hit ? String((hit as { data?: unknown }).data) : null;
         };
-        const navText = pick('账户净值');
-        const posText = pick('仓位');
-        const lines = [`<b>${date}</b>`];
-        if (navText) lines.push(`净值指数 ${navText}`);
-        if (posText) lines.push(`<span style="color:${CHART_LINE_PURPLE}">仓位 ${posText}%</span>`);
         for (const name of ['沪深300', '上证指数']) {
           const v = pick(name);
           if (v) lines.push(`${name} ${v}`);
@@ -266,34 +311,68 @@ const option = computed<EChartsCoreOption>(() => {
         return lines.join('<br/>');
       },
     },
-    xAxis: {
-      type: 'category',
-      data: dates,
-      boundaryGap: false,
-      axisLine: { lineStyle: { color: CHART_AXIS_LINE_COLOR } },
-      axisLabel: { color: CHART_TEXT_COLOR, fontSize: 10 },
-      axisTick: { show: false },
-    },
-    yAxis: [
-      {
-        type: 'value',
-        scale: true,
-        splitLine: { lineStyle: { color: CHART_SPLIT_LINE_COLOR } },
-        axisLabel: { color: CHART_TEXT_COLOR, fontSize: 10, formatter: (v: number) => v.toFixed(0) },
-      },
-      {
-        type: 'value',
-        min: 0,
-        max: 100,
-        position: 'right',
-        splitLine: { show: false },
-        axisLabel: {
-          color: CHART_LINE_PURPLE,
-          fontSize: 10,
-          formatter: (v: number) => `${v}%`,
+    axisPointer: { link: [{ xAxisIndex: 'all' }] },
+    xAxis: subOn
+      ? [
+          {
+            type: 'category',
+            gridIndex: 0,
+            data: dates,
+            boundaryGap: false,
+            axisLine: { lineStyle: { color: CHART_AXIS_LINE_COLOR } },
+            axisTick: { show: false },
+            axisLabel: { show: false },
+          },
+          {
+            type: 'category',
+            gridIndex: 1,
+            data: dates,
+            boundaryGap: false,
+            axisLine: { lineStyle: { color: CHART_AXIS_LINE_COLOR } },
+            axisTick: { show: false },
+            axisLabel: { color: CHART_TEXT_COLOR, fontSize: 10 },
+          },
+        ]
+      : {
+          type: 'category',
+          data: dates,
+          boundaryGap: false,
+          axisLine: { lineStyle: { color: CHART_AXIS_LINE_COLOR } },
+          axisLabel: { color: CHART_TEXT_COLOR, fontSize: 10 },
+          axisTick: { show: false },
         },
-      },
-    ],
+    yAxis: subOn
+      ? [
+          {
+            type: 'value',
+            gridIndex: 0,
+            scale: true,
+            splitLine: { lineStyle: { color: CHART_SPLIT_LINE_COLOR } },
+            axisLabel: { color: CHART_TEXT_COLOR, fontSize: 10, formatter: (v: number) => v.toFixed(0) },
+          },
+          {
+            type: 'value',
+            gridIndex: 1,
+            min: 0,
+            max: 100,
+            interval: 50,
+            position: 'right',
+            splitLine: { show: false },
+            axisLabel: {
+              color: CHART_LINE_YELLOW,
+              fontSize: 10,
+              formatter: (v: number) => `${v}%`,
+            },
+          },
+        ]
+      : [
+          {
+            type: 'value',
+            scale: true,
+            splitLine: { lineStyle: { color: CHART_SPLIT_LINE_COLOR } },
+            axisLabel: { color: CHART_TEXT_COLOR, fontSize: 10, formatter: (v: number) => v.toFixed(0) },
+          },
+        ],
     series,
   };
 });
@@ -326,8 +405,8 @@ const option = computed<EChartsCoreOption>(() => {
       <span class="text-text-tertiary">正式接入后按起止日调 queryPnlSummary（区间过长自动分段）</span>
     </div>
 
-    <!-- 图表 -->
-    <div class="relative min-h-0 flex-1">
+    <!-- 图表（开启「仓位变化」时内部按 3:1 分主图 / 仓位副图两个 grid） -->
+    <div ref="chartBox" class="relative min-h-0 flex-1">
       <BaseChart :options="option" not-merge />
     </div>
 
@@ -379,7 +458,7 @@ const option = computed<EChartsCoreOption>(() => {
       </div>
     </template>
     <p class="mt-1 shrink-0 text-xs text-text-tertiary">
-      左轴净值指数（基点 1000）{{ posOn ? ' · 右轴仓位 %' : '' }} · {{ rangeLabel }}
+      左轴净值指数（基点 1000）{{ posOn ? ' · 副图仓位 %（右轴）' : '' }} · {{ rangeLabel }}
     </p>
   </div>
 </template>
