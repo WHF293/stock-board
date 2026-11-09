@@ -7,20 +7,20 @@ import { tzzbMcpProxyPlugin } from './server/tzzb-mcp-proxy.ts'
 
 // https://vite.dev/config/
 export default defineConfig(({ mode }) => {
-  // 投资账本 MCP 代理目标来自 .env.local（gitignore 覆盖，上游域名不入库）；
-  // 未配置时 tzzbMcpProxyPlugin 内部对请求回 503，前端落空态
-  const env = loadEnv(mode, process.cwd(), '')
+// 投资账本 MCP 正式环境已发布（2026-11-09），代理目标写死正式 endpoint；
+// .env.local 仅保留可选的静态 token（VITE_TZZB_MCP_TOKEN）与凭据文件路径（TZZB_MCP_TOKEN_FILE）
+const env = loadEnv(mode, process.cwd(), '')
 
-  return {
-  // 根路径：Tauri 客户端与常规托管均部署在域名根下
-  // （GitHub Pages 子路径托管已关闭；如重启用请改回 '/stock-board/'）
-  base: '/',
-  plugins: [
-    tailwindcss(),
-    vue(),
-    stockProxyPlugin(),
-    tzzbMcpProxyPlugin(env.VITE_TZZB_MCP_URL, env.VITE_TZZB_MCP_TOKEN, env.TZZB_MCP_TOKEN_FILE),
-  ],
+return {
+// 根路径：Tauri 客户端与常规托管均部署在域名根下
+// （GitHub Pages 子路径托管已关闭；如重启用请改回 '/stock-board/'）
+base: '/',
+plugins: [
+  tailwindcss(),
+  vue(),
+  stockProxyPlugin(),
+  tzzbMcpProxyPlugin(env.VITE_TZZB_MCP_TOKEN, env.TZZB_MCP_TOKEN_FILE),
+],
   /**
    * dev server 显式绑定 **IPv4 回环**
    *

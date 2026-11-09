@@ -21,9 +21,9 @@ import {
  * 投资账本（tzzb）数据出口
  *
  * 传输形态：远程 MCP（Streamable HTTP JSON-RPC），dev/preview 阶段经同源代理
- * `/tzzb-mcp` 转发到上游 endpoint（server/tzzb-mcp-proxy.ts；目标地址来自
- * .env.local 的 VITE_TZZB_MCP_URL，**上游域名不入库**，构建产物只含同源
- * 路径与开关布尔值）。未配置时（他人克隆 / CI）各接口返回空数据，不炸构建。
+ * `/tzzb-mcp` 转发到上游 endpoint（server/tzzb-mcp-proxy.ts）。正式环境已发布
+ * （2026-11-09），上游 endpoint 写死为 TZZB_MCP_ENDPOINT，不再依赖 .env.local
+ * 与用户自定义配置文件。
  *
  * 会话：首次调用做 MCP initialize 握手拿 Mcp-Session-Id，后续复用；
  * 上游判定会话失效（404/400）时自动重新握手并重试一次。
@@ -32,13 +32,13 @@ import {
  * 用法见 .ai/项目资源/投资账本MCP同步-开发方案.md；本机配置在 .env.local，gitignore 已覆盖）。
  */
 
-/** 客户端开关：.env.local 配置 VITE_TZZB_MCP_PROXY=1 时走同源代理真调上游 */
-export const TZZB_MCP_LIVE: boolean = import.meta.env.VITE_TZZB_MCP_PROXY === '1';
+/** 客户端开关：正式环境已发布，MCP 通道恒开启（历史 dev 开关，保留常量避免调用方大改） */
+export const TZZB_MCP_LIVE: boolean = true;
 
 /** MCP 同源代理路径（server/tzzb-mcp-proxy.ts 挂载） */
 const MCP_PROXY_PATH = '/tzzb-mcp';
 
-/** 正式环境 MCP endpoint（写死正式域名，换环境只改此处；阶段 2 sidecar 直连用） */
+/** 正式环境 MCP endpoint（写死正式域名，换环境只改此处与 server/tzzb-mcp-proxy.ts） */
 export const TZZB_MCP_ENDPOINT = 'https://tzzb.10jqka.com.cn/mcp';
 
 /* ---------------- MCP Streamable HTTP 客户端 ---------------- */
@@ -54,17 +54,27 @@ let sessionPromise: Promise<string | undefined> | null = null;
 
 /**
  * 解析响应体：兼容 JSON 与 SSE（data: 行）两种形态
+ *
+ * 上游 WAF 被瞬时并发触发时会返回 200 + 请求头回显 JSON（无 jsonrpc 字段），
+ * 代理层已做退避重试；此处再兜底校验一次，非 JSON-RPC 一律抛错，
+ * 避免把回显垃圾静默写进页面状态（表现为日历空 / 切区间不刷新）
  * @param text 响应原文
- * @returns 解析出的 JSON 对象（SSE 取最后一个 data 帧）
+ * @returns 解析出的 JSON-RPC 对象（SSE 取最后一个 data 帧）
  */
 const parseRpcBody = (text: string): Record<string, unknown> => {
-  if (!text.includes('data:')) return JSON.parse(text) as Record<string, unknown>;
-  const frames = text
-    .split('\n')
-    .filter((line) => line.startsWith('data:'))
-    .map((line) => line.slice(5).trim())
-    .filter((line) => line !== '');
-  return JSON.parse(frames[frames.length - 1] ?? '{}') as Record<string, unknown>;
+  const json = (() => {
+    if (!text.includes('data:')) return JSON.parse(text) as unknown;
+    const frames = text
+      .split('\n')
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trim())
+      .filter((line) => line !== '');
+    return JSON.parse(frames[frames.length - 1] ?? '{}') as unknown;
+  })() as Record<string, unknown>;
+  if (!json || typeof json !== 'object' || !('jsonrpc' in json)) {
+    throw new Error('MCP 上游返回异常响应（疑似 WAF 拦截），请稍后重新同步');
+  }
+  return json;
 };
 
 /**
@@ -197,6 +207,17 @@ interface TzzbKeys {
   custId: string;
 }
 
+/** 当前账户范围（null = 全部账户；切换账户时由看板设置，影响全部数据接口取数口径） */
+let scopeAccountId: string | null = null;
+
+/**
+ * 设置账户范围（看板切换账户时调用；null = 全部账户）
+ * @param accountId 账户 id（promptAccountSelection 分组内条目 id）；null = 全部
+ */
+export const setTzzbAccountScope = (accountId: string | null): void => {
+  scopeAccountId = accountId;
+};
+
 /** promptAccountSelection 分组响应形态 */
 type TzzbAccountRaw = Record<string, { id: string; name: string }[]>;
 
@@ -226,18 +247,22 @@ const ensureAccountRaw = async (): Promise<TzzbAccountRaw | null> => {
 };
 
 /**
- * 从账户分组派生键集合（逗号分隔多账号）
+ * 从账户分组派生键集合（逗号分隔多账号；设置了账户范围时仅取该账户条目）
  * @param r 分组响应
  * @returns 股票三键 + 基金两键
  */
 const deriveKeys = (r: Record<string, { id: string; name: string }[]>): TzzbKeys => {
-  const ids = (key: string): string =>
-    ((r[key] as { id: string }[] | undefined) ?? []).map((a) => String(a.id)).join(',');
+  const ids = (key: string): string => {
+    const list = r[key] ?? [];
+    const scoped = scopeAccountId ? list.filter((a) => String(a.id) === scopeAccountId) : list;
+    return scoped.map((a) => String(a.id)).join(',');
+  };
   return {
     fundKey: ids('fund_key'),
     rzrqFundKey: ids('rzrq_fund_key'),
     manualId: ids('manual_id'),
     fundId: ids('fund_id'),
+    // cust_id 是用户级客户号（单条），不随账户范围过滤
     custId: String((r['cust_id'] as { id: string }[] | undefined)?.[0]?.id ?? ''),
   };
 };
@@ -726,74 +751,6 @@ export const startTzzbMcpAuth = async (): Promise<string> => {
   if (!res.ok || json.error) throw new Error(json.error ?? `auth-start HTTP ${res.status}`);
   if (!json.authorizeUrl) throw new Error('auth-start 未返回授权地址');
   return json.authorizeUrl;
-};
-
-/** MCP 运行时配置响应形态（GET/POST /tzzb-mcp/config，dev server 本地端点） */
-export interface TzzbMcpConfig {
-  /** 用户自定义上游 endpoint（tzzb-mcp.config.local.json；未自定义时 null） */
-  customUrl: string | null;
-  /** .env.local 是否配置了兜底 endpoint（VITE_TZZB_MCP_URL） */
-  envConfigured: boolean;
-  /** 当前生效 endpoint（自定义优先，兜底 env；都未配置时 null） */
-  effectiveUrl: string | null;
-  /** 当前是否有生效的静态 Bearer token（配置文件或 .env.local） */
-  tokenSet: boolean;
-  /** 是否配置了 OAuth 凭据文件（TZZB_MCP_TOKEN_FILE / oauth.local.json） */
-  tokenFileSet: boolean;
-}
-
-/**
- * 配置响应形态守卫：真实端点恒返回含 customUrl / effectiveUrl / envConfigured 的对象。
- * 打包客户端（无 vite dev server）里请求会被 SPA 兜底接走返回 200 + HTML，解析
- * JSON 失败被吞成空对象 —— 不加守卫会把这种假 200 当成保存成功（v4.33.1 后仍
- * 复现的「保存后重开弹窗地址不回显」根因）
- * @param json 待校验的已解析响应
- * @returns 是否为真实配置端点的响应
- */
-const isTzzbMcpConfig = (json: unknown): json is TzzbMcpConfig => {
-  if (!json || typeof json !== 'object') return false;
-  const record = json as Record<string, unknown>;
-  return 'customUrl' in record && 'effectiveUrl' in record && 'envConfigured' in record;
-};
-
-/**
- * 取 MCP 运行时配置（「编辑 MCP」弹窗回填与状态行展示用）
- * @returns 配置对象；请求失败 / 响应非配置端点形态（SPA 兜底）返回 null
- */
-export const fetchTzzbMcpConfig = async (): Promise<TzzbMcpConfig | null> => {
-  try {
-    const res = await fetch(`${MCP_PROXY_PATH}/config`);
-    if (!res.ok) return null;
-    const json: unknown = await res.json();
-    return isTzzbMcpConfig(json) ? json : null;
-  } catch {
-    return null;
-  }
-};
-
-/**
- * 保存 MCP 运行时配置（落盘 tzzb-mcp.config.local.json，立即生效无需重启 dev server）；
- * url 置空 = 回落 .env.local；url 变更时 server 端自动作废旧上游的 OAuth 凭据
- * @param url 上游 endpoint（空串 = 清除自定义，回退 .env.local）
- * @param token 可选静态 Bearer token（undefined = 不修改；null/空串 = 清除）
- * @returns 保存后的配置
- * @throws 服务端校验失败（如非法 URL）/ 请求失败 / 端点未挂载（SPA 兜底假 200，保存通道不可用）
- */
-export const saveTzzbMcpConfig = async (url: string, token?: string | null): Promise<TzzbMcpConfig> => {
-  const res = await fetch(`${MCP_PROXY_PATH}/config`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ url, token }),
-  });
-  const json = (await res.json().catch(() => null)) as (TzzbMcpConfig & { error?: string }) | null;
-  if (json?.error) throw new Error(json.error);
-  if (!res.ok) throw new Error(`config HTTP ${res.status}`);
-  // 端点未挂载（打包客户端等 SPA 兜底场景）时返回 200 + HTML，解析不出配置形态：
-  // 此处必须显式报错，否则会误报「保存成功」而实际什么都没落盘
-  if (!json || !isTzzbMcpConfig(json)) {
-    throw new Error('保存未生效：/tzzb-mcp/config 是 vite dev/preview server 的本地端点，当前页面未经其服务（打包客户端暂不支持「编辑MCP」）');
-  }
-  return json;
 };
 
 /**

@@ -59,9 +59,9 @@ const showProfit = computed(() => showMode.value !== 'rate');
 /** 是否显示收益率（收益独占时隐藏） */
 const showRate = computed(() => showMode.value !== 'profit');
 
-/** 日历当前年月（初始取采样月） */
-const dayY = ref(2026);
-const dayM = ref(10);
+/** 日历当前年月（初始取当前月；数据到达后跟随 dayCal.month） */
+const dayY = ref(dayjs().year());
+const dayM = ref(dayjs().month() + 1);
 watch(
   () => props.dayCal?.month,
   (m) => {
@@ -72,8 +72,8 @@ watch(
   { immediate: true },
 );
 
-/** 月历当前年 */
-const monY = ref(2026);
+/** 月历当前年（初始取当前年） */
+const monY = ref(dayjs().year());
 watch(
   () => props.monthCal?.year,
   (y) => {
@@ -82,8 +82,8 @@ watch(
   { immediate: true },
 );
 
-/** 采样截止年月（最新有数据月；来自日历数据） */
-const lastMonth = computed(() => props.dayCal?.month ?? '202610');
+/** 采样截止年月（最新有数据月；来自日历数据，兜底当前月） */
+const lastMonth = computed(() => props.dayCal?.month ?? dayjs().format('YYYYMM'));
 
 /** 逐日盈亏 map（yyyyMMdd → 点） */
 const dayMap = computed(() => {
