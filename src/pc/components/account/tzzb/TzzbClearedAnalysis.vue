@@ -7,6 +7,7 @@ import BaseChart from '../../charts/BaseChart.vue';
 import BaseEmpty from '../../ui/BaseEmpty.vue';
 import BaseTable from '../../ui/BaseTable.vue';
 import BaseTabs from '../../ui/BaseTabs.vue';
+import MenuIcon from '../../ui/MenuIcon.vue';
 import type { TableColumn } from '../../../../common/types/table.types.ts';
 import type {
   TzzbClearedPosition,
@@ -47,6 +48,72 @@ const KIND_OPTIONS = [
   { label: '个基', value: 'fund' },
 ];
 const kind = ref<string>('stock');
+
+/** 个股明细形态：cycle 逐周期平铺 / summary 按个股汇总（点击分组展开该股周期明细） */
+const STOCK_VIEW_OPTIONS = [
+  { label: '按周期', value: 'cycle' },
+  { label: '按个股汇总', value: 'summary' },
+];
+const stockView = ref<string>('cycle');
+
+/** 汇总视图展开的个股（code 集合） */
+const expandedStocks = ref<Set<string>>(new Set());
+
+/**
+ * 切换个股展开态
+ * @param code 证券代码
+ */
+const toggleStockExpand = (code: string): void => {
+  const next = new Set(expandedStocks.value);
+  if (next.has(code)) next.delete(code);
+  else next.add(code);
+  expandedStocks.value = next;
+};
+
+/** 个股汇总分组（按合计盈亏降序；周期按开仓日排序） */
+const stockSummaryGroups = computed(() => {
+  const map = new Map<
+    string,
+    {
+      code: string;
+      name: string;
+      cycles: TzzbClearedPosition[];
+      closedCount: number;
+      profit: number;
+      fee: number;
+      winRate: number | null;
+      holdDays: number;
+    }
+  >();
+  for (const r of props.cleared) {
+    const g = map.get(r.code) ?? {
+      code: r.code,
+      name: r.name,
+      cycles: [],
+      closedCount: 0,
+      profit: 0,
+      fee: 0,
+      winRate: null,
+      holdDays: 0,
+    };
+    g.cycles.push(r);
+    if (r.closeDate) g.closedCount += 1;
+    g.profit += r.profit;
+    g.fee += r.fee;
+    g.holdDays += r.holdDays;
+    map.set(r.code, g);
+  }
+  return [...map.values()]
+    .map((g) => {
+      const closed = g.cycles.filter((r) => r.closeDate);
+      return {
+        ...g,
+        winRate: closed.length > 0 ? closed.filter((r) => r.profit > 0).length / closed.length : null,
+        cycles: [...g.cycles].sort((a, b) => a.openDate.localeCompare(b.openDate)),
+      };
+    })
+    .sort((a, b) => b.profit - a.profit);
+});
 
 /**
  * 千分位金额
@@ -268,6 +335,9 @@ const stockColumns: TableColumn<TzzbClearedPosition>[] = [  { key: 'name', label
   },
 ];
 
+/** 汇总视图展开后的周期明细列（去掉证券列，分组行已标明个股） */
+const stockDetailColumns: TableColumn<TzzbClearedPosition>[] = stockColumns.filter((c) => c.key !== 'name');
+
 /* ---------------- 个基（累计口径） ---------------- */
 
 /** 个基汇总指标 */
@@ -296,12 +366,15 @@ const fundColumns: TableColumn<TzzbHoldingReturn>[] = [
     text="暂无建清仓数据：同步投资账本后自动生成周期分析"
   />
   <div v-else class="flex flex-col gap-3">
-    <!-- 维度切换 -->
+    <!-- 维度切换 + 个股明细形态切换 -->
     <div class="flex items-center justify-between gap-2">
       <BaseTabs v-model="kind" :options="KIND_OPTIONS" />
-      <span v-if="kind === 'fund'" class="text-xs text-text-tertiary">
-        个基暂无清仓周期工具，当前为累计持仓收益口径（费用缺失显示 —）
-      </span>
+      <div class="flex items-center gap-2">
+        <span v-if="kind === 'fund'" class="text-xs text-text-tertiary">
+          个基暂无清仓周期工具，当前为累计持仓收益口径（费用缺失显示 —）
+        </span>
+        <BaseTabs v-if="kind === 'stock'" v-model="stockView" :options="STOCK_VIEW_OPTIONS" />
+      </div>
     </div>
 
     <!-- 个股：汇总条 + 分桶 + 周期明细 -->
@@ -397,8 +470,85 @@ const fundColumns: TableColumn<TzzbHoldingReturn>[] = [
         </div>
       </div>
 
-      <!-- 周期明细 -->
+      <!-- 按个股汇总：点击分组展开该股全部周期明细（王总 2026-11-09 指定） -->
+      <template v-if="stockView === 'summary'">
+        <div class="flex flex-col gap-1.5">
+          <div
+            v-for="g in stockSummaryGroups"
+            :key="g.code"
+            class="overflow-hidden rounded-xl border border-flat-weak"
+          >
+            <button
+              type="button"
+              class="flex w-full items-center gap-3 bg-flat-weak/40 px-3 py-2.5 text-left transition-colors hover:bg-flat-weak"
+              @click="toggleStockExpand(g.code)"
+            >
+              <MenuIcon
+                name="chevronRight"
+                :size="14"
+                class="shrink-0 text-text-tertiary transition-transform"
+                :class="expandedStocks.has(g.code) ? 'rotate-90' : ''"
+              />
+              <div class="min-w-0 flex-1">
+                <p class="truncate text-sm font-medium text-text">
+                  {{ g.name }}
+                  <span class="ml-1 font-mono text-xs text-text-tertiary">{{ g.code }}</span>
+                </p>
+                <p class="mt-0.5 text-xs text-text-tertiary">
+                  {{ g.cycles.length }} 个周期（已清 {{ g.closedCount }}）
+                  <template v-if="g.winRate !== null">· 胜率 {{ (g.winRate * 100).toFixed(0) }}%</template>
+                  · 合计持有 {{ g.holdDays }} 天
+                </p>
+              </div>
+              <div class="shrink-0 text-right font-mono text-xs tabular-nums">
+                <p class="font-semibold" :class="plClass(g.profit)">{{ signYuan(g.profit) }}</p>
+                <p class="text-text-tertiary">费用 {{ yuan(g.fee) }}</p>
+              </div>
+            </button>
+            <BaseTable
+              v-if="expandedStocks.has(g.code)"
+              :columns="stockDetailColumns"
+              :rows="g.cycles"
+              :row-key="(r) => `${r.code}-${r.openDate}`"
+              :min-width="'680px'"
+              scroll-class="table-scroll-sm"
+              row-clickable
+              enable-dblclick-nav
+              @row-click="(r) => emit('open', r.code)"
+              @row-dblclick="(r) => emit('openPage', r.code)"
+            >
+              <template #period="{ row }">
+                <span class="font-mono text-xs">
+                  {{ row.openDate }} → <b v-if="row.closeDate" class="font-normal">{{ row.closeDate }}</b>
+                  <b v-else class="text-primary">持有中</b>
+                </span>
+              </template>
+              <template #profit="{ row }">
+                <span class="font-mono font-medium tabular-nums" :class="plClass(row.profit)">
+                  {{ signYuan(row.profit) }}
+                </span>
+              </template>
+              <template #rate="{ row }">
+                <span class="font-mono tabular-nums" :class="plClass(row.rate)">
+                  {{ (row.rate * 100).toFixed(2) }}%
+                </span>
+              </template>
+              <template #feeRatio="{ row }">
+                <span class="font-mono tabular-nums">
+                  {{ row.profit !== 0 ? `${((row.fee / Math.abs(row.profit)) * 100).toFixed(0)}%` : '—' }}
+                </span>
+              </template>
+            </BaseTable>
+          </div>
+          <p class="text-xs text-text-tertiary">
+            共 {{ stockSummaryGroups.length }} 只个股 · 点击分组行展开逐周期明细 · 单击开侧栏 / 双击进详情
+          </p>
+        </div>
+      </template>
+
+      <!-- 周期明细（按周期平铺） -->
       <BaseTable
+        v-else
         :columns="stockColumns"
         :rows="cleared"
         :row-key="(r) => `${r.code}-${r.openDate}`"

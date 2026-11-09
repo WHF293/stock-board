@@ -203,3 +203,31 @@ export const PLUGIN_UPDATE_OK_BODY = (name: string, version: string): string =>
  */
 export const PLUGIN_UPDATE_ALL_BODY = (updated: number, failed: number): string =>
   failed === 0 ? `已更新 ${updated} 个插件` : `已更新 ${updated} 个，${failed} 个失败`;
+
+// ——— 插件页页头版本角标（2026-11-10 王总指定：注册独立页面的插件在页头显示版本号，点击检查更新）———
+
+/** 角标 tooltip（空闲态；检查中 / 更新中随 phase 换文案） */
+export const PLUGIN_UPDATE_BADGE_TOOLTIP = '点击检查更新';
+
+/**
+ * 角标检查结果浮窗标题（结果正文按「已是最新 / 未收录 / 失败」分派）
+ * @param name 插件展示名
+ * @returns 标题
+ */
+export const PLUGIN_UPDATE_BADGE_RESULT_TITLE = (name: string): string =>
+  `「${name}」检查更新`;
+
+/**
+ * 浮窗：清单已收录且无新版本
+ * @param version 当前已装版本
+ * @returns 正文
+ */
+export const PLUGIN_UPDATE_BADGE_LATEST_BODY = (version: string): string =>
+  `已是最新版本（v${version}）`;
+
+/** 浮窗：官方更新清单里没有这个插件（第三方源插件不参与在线检查更新） */
+export const PLUGIN_UPDATE_BADGE_NOT_INDEXED_BODY =
+  '未收录官方更新清单，暂不支持在线检查更新';
+
+/** 浮窗：内置插件（随应用分发，不在在线更新范围） */
+export const PLUGIN_UPDATE_BADGE_BUILTIN_BODY = '内置插件随应用发版更新，无需单独检查';

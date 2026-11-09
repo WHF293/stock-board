@@ -25,6 +25,7 @@ import PluginStockPickerHost from "../components/plugin/PluginStockPickerHost.vu
 import SidebarPanelHost from "../components/plugin/SidebarPanelHost.vue";
 import SidebarPanelEntry from "../components/plugin/SidebarPanelEntry.vue";
 import PluginPanelDrawer from "../components/plugin/PluginPanelDrawer.vue";
+import PluginPageVersionBadge from "../components/plugin/PluginPageVersionBadge.vue";
 import { pluginKernel } from "../../common/plugin/index";
 import { matchesCommandKeys, parseCommandKeys } from "../plugin/command-keys";
 import { useTheme } from "../../common/composables/use-theme";
@@ -934,6 +935,8 @@ void marketStatusStore.refresh();
             <h1 class="truncate text-base font-semibold text-text">
               {{ pageTitle }}
             </h1>
+            <!-- 插件页页头版本角标：当前页归属插件时显示 v{version}，点击检查更新（有新版自动更新） -->
+            <PluginPageVersionBadge />
           </div>
           <!-- 顶栏工具条：桌面端全部条目（宿主 + 插件）已移入自绘 TitleBar，此处为空；
                浏览器无标题栏，全部条目都留在页内。右侧恒置「插件设置」齿轮

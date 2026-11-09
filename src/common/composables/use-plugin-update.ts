@@ -75,6 +75,12 @@ export interface UsePluginUpdateReturn {
    */
   candidateOf: (id: string) => PluginUpdateCandidate | undefined;
   /**
+   * 清单里某插件的最新版本（未收录 = 空串）
+   * @param id 插件 id
+   * @returns 清单中的最新版本；未收录或从未成功拉到清单时为空串
+   */
+  indexedVersionOf: (id: string) => string;
+  /**
    * 检查更新（幂等：在途请求共享同一 Promise；静默调用受冷却期约束）
    * @param options 选项（`force: true` 为用户手动触发，绕过冷却）
    */
@@ -186,6 +192,17 @@ const busy = computed<boolean>(() => checking.value || updatingIds.value.length 
  */
 const candidateOf = (id: string): PluginUpdateCandidate | undefined =>
   candidates.value.find((candidate) => candidate.id === id);
+
+/**
+ * 清单里某插件的最新版本（未收录 = 空串）
+ *
+ * 供「插件页页头版本角标」区分「已是最新」与「未收录」：候选只覆盖
+ * 「已装且远端更新」，清单命中但版本不比本地新也算「已是最新」。
+ * @param id 插件 id
+ * @returns 清单中的最新版本；未收录或从未成功拉到清单时为空串
+ */
+const indexedVersionOf = (id: string): string =>
+  index.value?.plugins.find((entry) => entry.id === id)?.version ?? '';
 
 /**
  * 执行一次检查（含状态推进与埋点；不外抛，失败写进 errorMessage）
@@ -351,6 +368,7 @@ export const usePluginUpdate = (): UsePluginUpdateReturn => ({
   checking,
   busy,
   candidateOf,
+  indexedVersionOf,
   check,
   applyUpdate,
   applyAll,

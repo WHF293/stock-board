@@ -1,7 +1,6 @@
 import { createServer as createHttpServer, type Server } from 'node:http';
 import crypto from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import type { Connect, Plugin } from 'vite';
 
 /** 同源代理路径（前端 MCP 客户端统一 POST 此路径） */
@@ -13,35 +12,11 @@ export const TZZB_MCP_AUTH_INFO_PATH = '/auth-info';
 /** 鉴权启动子路径（POST <TZZB_MCP_PROXY_PATH>/auth-start；仅本地 dev server 提供，不透传上游） */
 export const TZZB_MCP_AUTH_START_PATH = '/auth-start';
 
-/** MCP 配置子路径（GET/POST <TZZB_MCP_PROXY_PATH>/config；仅本地 dev server 提供，不透传上游） */
-export const TZZB_MCP_CONFIG_PATH = '/config';
-
 /**
- * 用户运行时配置文件（项目根 tzzb-mcp.config.local.json；`*.local` 已被
- * .gitignore 覆盖不入库）。「编辑 MCP」弹窗保存后立即生效，无需重启 dev server；
- * 未配置的字段回落 .env.local（VITE_TZZB_MCP_URL / VITE_TZZB_MCP_TOKEN）
+ * 正式环境 MCP endpoint（2026-11-09 正式环境发布，写死此处的唯一目标地址；
+ * 与前端 src/common/api/tzzb.api.ts 的 TZZB_MCP_ENDPOINT 保持一致，换环境两处同步改）
  */
-const CONFIG_FILE = 'tzzb-mcp.config.local.json';
-
-/** 用户配置文件形态（POST <TZZB_MCP_PROXY_PATH>/config 落盘） */
-interface TzzbMcpConfigFile {
-  /** 上游 MCP endpoint（「编辑 MCP」弹窗保存；缺省回落 .env.local） */
-  url?: string;
-  /** 可选静态 Bearer Token（缺省回落 .env.local 与凭据文件 oauth.local.json） */
-  token?: string;
-}
-
-/**
- * 读用户配置文件
- * @returns 配置对象；文件缺失 / 损坏返回空结构（不抛错，回落 env）
- */
-const loadConfigFile = (): TzzbMcpConfigFile => {
-  try {
-    return JSON.parse(readFileSync(resolve(process.cwd(), CONFIG_FILE), 'utf-8')) as TzzbMcpConfigFile;
-  } catch {
-    return {};
-  }
-};
+const OFFICIAL_MCP_ENDPOINT = 'https://tzzb.10jqka.com.cn/mcp';
 
 /** 生效 target / token 的惰性解析器（每次调用读配置文件，弹窗保存即生效） */
 type ValueGetter = () => string | undefined;
@@ -68,6 +43,44 @@ const RESPONSE_HEADERS = ['mcp-session-id', 'mcp-protocol-version'] as const;
 
 /** 上游超时（MCP 工具调用可能较慢，放宽到 60s） */
 const UPSTREAM_TIMEOUT_MS = 60_000;
+
+/** 上游请求 UA（WAF 对非浏览器 UA 敏感，伪装成真实 Chrome） */
+const UPSTREAM_USER_AGENT =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+
+/**
+ * WAF 回显熔断基础冷却（毫秒）。实测（2026-11-09）：瞬时并发触发 hexin-waf
+ * 影子封禁后，上游对**任何**请求（任意路径/方法/UA/token）回 200 + 请求头回显，
+ * 从最后一次请求起静默约 3 分钟才解除 —— 期间任何重试都会续封，所以触发后
+ * 必须完全静默冷却，而不是短间隔退避（短退避会永远解不了封）
+ */
+const WAF_COOLDOWN_MS = 180_000;
+/** WAF 冷却上限（连续触发时冷却时长指数递增，封顶 30 分钟） */
+const WAF_COOLDOWN_MAX_MS = 30 * 60_000;
+
+/** WAF 熔断状态（同进程所有请求共享）：回显触发后进入冷却，冷却期内请求快速
+ * 失败（不打上游）；冷却结束放行下一个请求作探测 —— 成功则复位，仍回显则冷却
+ * 时长翻倍（连续触发说明封禁未过，继续打只会续封） */
+const wafBreaker = { cooldownUntil: 0, strikes: 0 };
+
+/** 合法上游响应体的开头特征（JSON-RPC 单响应 / SSE 帧 / SSE 注释行） */
+const JSONRPC_BODY_PREFIXES = ['{"jsonrpc"', 'event:', 'data:', ':'] as const;
+
+/** 上游响应体 reader 的最小结构（Node fetch body.getReader() 返回，宽于标准类型） */
+interface UpstreamBodyReader {
+  /** 读取下一块 */
+  read: () => Promise<{ done: boolean; value?: Uint8Array }>;
+  /** 提前终止（丢弃 WAF 回显时用） */
+  cancel: () => Promise<void>;
+}
+
+/** 响应体预读首块 */
+interface UpstreamBodyChunk {
+  /** 流是否已读完 */
+  done: boolean;
+  /** 块数据 */
+  value?: Uint8Array;
+}
 
 /**
  * 凭据文件形态（.ai/项目资源/tzzb-mcp/oauth.local.json，由
@@ -116,10 +129,10 @@ const createAuthProvider = (getTarget: ValueGetter, tokenFile: string | undefine
   };
 
   /**
-   * 用 refresh_token 续期并回写凭据文件
+   * 用 refresh_token 续期并回写凭据文件（实际请求逻辑，由 refresh 单飞包装）
    * @returns 新 access token；续期失败返回 null
    */
-  const refresh = async (): Promise<string | null> => {
+  const doRefresh = async (): Promise<string | null> => {
     const store = load();
     const refreshToken = store?.tokens?.refresh_token;
     const clientId = store?.registration?.client_id;
@@ -156,6 +169,22 @@ const createAuthProvider = (getTarget: ValueGetter, tokenFile: string | undefine
     } catch {
       return null;
     }
+  };
+
+  /** 进行中的续期（单飞：上游 access token 仅 5 分钟有效，突发并发会同时到期，
+   * 多个 401 触发并发 refresh 时 refresh_token 轮换会互相顶掉 —— 必须合并为一次） */
+  let refreshing: Promise<string | null> | null = null;
+
+  /**
+   * 取当前可用的 access token（过期先续期；并发续期合并为一次请求）
+   * @returns Bearer token；无凭据返回 null
+   */
+  const refresh = async (): Promise<string | null> => {
+    if (refreshing) return refreshing;
+    refreshing = doRefresh().finally(() => {
+      refreshing = null;
+    });
+    return refreshing;
   };
 
   /**
@@ -396,19 +425,16 @@ const readRequestBody = (req: Connect.IncomingMessage): Promise<Buffer> =>
  *
  * 浏览器直连外部 MCP 会被 CORS 拦（Streamable HTTP 要求自定义头 + OPTIONS 预检），
  * dev/preview server 以同源路径反向代理到上游 MCP endpoint：
- * - 目标地址运行时解析：用户配置文件 tzzb-mcp.config.local.json 优先，
- *   缺省回落 .env.local 的 VITE_TZZB_MCP_URL（**上游域名绝不写进入库源码**，
- *   构建产物只含同源路径）；「编辑 MCP」弹窗保存后立即生效，无需重启；
+ * - 目标地址写死正式环境 OFFICIAL_MCP_ENDPOINT（2026-11-09 正式环境发布；
+ *   原 .env.local / tzzb-mcp.config.local.json 运行时配置与「编辑MCP」功能一并下线）；
  * - 鉴权：优先凭据文件（TZZB_MCP_TOKEN_FILE，oauth.local.json，由
  *   tzzb-auth-helper.mjs 维护，401 自动 refresh_token 续期重试），其次静态 token；
  * - 方法固定透传 POST（MCP Streamable HTTP 仅用 POST + 可选 GET 流）；
- *   例外：GET <同源路径>/auth-info、POST <同源路径>/auth-start、
- *   GET/POST <同源路径>/config 为本地端点（授权时间 / 发起浏览器鉴权 /
- *   读写运行时配置，不透传上游）；
+ *   例外：GET <同源路径>/auth-info、POST <同源路径>/auth-start
+ *   为本地端点（授权时间 / 发起浏览器鉴权，不透传上游）；
  * - MCP 会话头双向透传（client → upstream 的 Mcp-Session-Id，upstream → client 的
  *   下发头）；响应体流式回写，SSE 渐进输出不被缓冲卡死
- * @param envTarget .env.local 的上游 endpoint（兜底；用户配置文件优先，config 端点状态行用）
- * @param getTarget 生效 target 惰性解析器
+ * @param getTarget 生效 target 惰性解析器（恒返回正式环境 endpoint）
  * @param getToken 生效静态 token 惰性解析器
  * @param tokenFile 可选凭据文件路径（.env.local 的 TZZB_MCP_TOKEN_FILE）
  * @param auth 凭据提供器（取 token / 续期）
@@ -417,7 +443,6 @@ const readRequestBody = (req: Connect.IncomingMessage): Promise<Buffer> =>
  */
 const createTzzbMcpMiddleware =
   (
-    envTarget: string | undefined,
     getTarget: ValueGetter,
     getToken: ValueGetter,
     tokenFile: string | undefined,
@@ -451,86 +476,28 @@ const createTzzbMcpMiddleware =
       }
       return;
     }
-    // 本地配置端点：GET /tzzb-mcp/config 返回当前生效配置（供「编辑 MCP」弹窗回填）
-    if (req.method === 'GET' && urlPath === TZZB_MCP_CONFIG_PATH) {
-      const custom = loadConfigFile();
-      const customUrl = custom.url?.trim() || null;
-      res.statusCode = 200;
-      res.setHeader('Content-Type', 'application/json');
-      res.end(
-        JSON.stringify({
-          customUrl,
-          envConfigured: Boolean(envTarget?.trim()),
-          effectiveUrl: getTarget() ?? null,
-          tokenSet: Boolean(getToken()),
-          tokenFileSet: Boolean(tokenFile),
-        }),
-      );
-      return;
-    }
-    // 本地配置端点：POST /tzzb-mcp/config 保存用户配置（落盘即生效，无需重启）。
-    // url 置空 = 回落 .env.local；token 传 null/'' = 清除自定义 token；
-    // url 变更时旧上游的 OAuth registration/tokens 一并作废（绑定旧 origin，留着必 401）
-    if (req.method === 'POST' && urlPath === TZZB_MCP_CONFIG_PATH) {
-      try {
-        const body = JSON.parse((await readRequestBody(req)).toString('utf-8') || '{}') as {
-          url?: string | null;
-          token?: string | null;
-        };
-        const prevTarget = getTarget();
-        const store = loadConfigFile();
-        let nextUrl: string | undefined;
-        if (typeof body.url === 'string' && body.url.trim()) {
-          const parsed = new URL(body.url.trim());
-          if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-            throw new Error('仅支持 http(s) 地址');
-          }
-          nextUrl = body.url.trim();
-        }
-        if (nextUrl) store.url = nextUrl;
-        else delete store.url;
-        if (body.token === null || (typeof body.token === 'string' && !body.token.trim())) {
-          delete store.token;
-        } else if (typeof body.token === 'string') {
-          store.token = body.token.trim();
-        }
-        writeFileSync(resolve(process.cwd(), CONFIG_FILE), JSON.stringify(store, null, 2));
-        // target 变更 → oauth.local.json 里的 registration/tokens 属于旧上游，作废防串用
-        const nowTarget = getTarget();
-        if (tokenFile && prevTarget && nowTarget && prevTarget !== nowTarget) {
-          try {
-            const oauth = JSON.parse(readFileSync(tokenFile, 'utf-8')) as TzzbAuthFile;
-            if (oauth.registration || oauth.tokens) {
-              delete oauth.registration;
-              delete oauth.tokens;
-              writeFileSync(tokenFile, JSON.stringify(oauth, null, 2));
-            }
-          } catch {
-            // 凭据文件缺失 / 损坏无需处理（鉴权流会重新注册）
-          }
-        }
-        res.statusCode = 200;
-        res.setHeader('Content-Type', 'application/json');
-        res.end(
-          JSON.stringify({
-            customUrl: store.url ?? null,
-            envConfigured: Boolean(envTarget?.trim()),
-            effectiveUrl: getTarget() ?? null,
-            tokenSet: Boolean(getToken()),
-            tokenFileSet: Boolean(tokenFile),
-          }),
-        );
-      } catch (err) {
-        res.statusCode = 400;
-        res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
-      }
-      return;
-    }
+    // 本地配置端点（GET/POST /tzzb-mcp/config 与「编辑MCP」功能）已于 2026-11-09
+    // 随正式环境发布一并下线：上游目标写死 OFFICIAL_MCP_ENDPOINT，不再可改
     const target = getTarget();
     if (!target) {
       res.statusCode = 503;
       res.end(JSON.stringify({ error: 'TZZB_MCP_NOT_CONFIGURED' }));
+      return;
+    }
+    // WAF 熔断冷却期：快速失败不打上游（任何重试都会续封，必须静默冷却）
+    const nowMs = Date.now();
+    if (nowMs < wafBreaker.cooldownUntil) {
+      const retryAfterMs = wafBreaker.cooldownUntil - nowMs;
+      res.statusCode = 503;
+      res.setHeader('Retry-After', String(Math.ceil(retryAfterMs / 1000)));
+      res.setHeader('Content-Type', 'application/json');
+      res.end(
+        JSON.stringify({
+          error: 'TZZB_MCP_WAF_COOLDOWN',
+          retryAfterMs,
+          message: `上游防护冷却中，约 ${Math.max(1, Math.ceil(retryAfterMs / 60_000))} 分钟后自动恢复（冷却期内请求快速失败，避免续封）`,
+        }),
+      );
       return;
     }
     try {
@@ -539,6 +506,8 @@ const createTzzbMcpMiddleware =
         const headers: Record<string, string> = {
           'Content-Type': 'application/json',
           Accept: 'application/json, text/event-stream',
+          // 上游 WAF（hexin-waf）对非浏览器 UA 敏感，固定伪装成真实浏览器特征
+          'User-Agent': UPSTREAM_USER_AGENT,
         };
         const bearer = (await auth.getAccessToken()) ?? getToken();
         if (bearer) headers.Authorization = `Bearer ${bearer}`;
@@ -555,31 +524,88 @@ const createTzzbMcpMiddleware =
           body,
           signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
         });
+      /**
+       * 正常响应透传：写入状态 / 响应头后流式回写（SSE 事件到达即推给浏览器）
+       * @param upstream 上游响应
+       * @param reader 响应体 reader
+       * @param first 已预读的首块（透传前判别 WAF 回显时读出，不能丢；未预读时 undefined）
+       */
+      const streamUpstream = async (
+        upstream: Response,
+        reader: UpstreamBodyReader,
+        first?: UpstreamBodyChunk,
+      ): Promise<void> => {
+        res.statusCode = upstream.status;
+        const contentType = upstream.headers.get('content-type');
+        if (contentType) res.setHeader('Content-Type', contentType);
+        for (const name of RESPONSE_HEADERS) {
+          const value = upstream.headers.get(name);
+          if (value) res.setHeader(name, value);
+        }
+        if (first?.value) res.write(first.value);
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          res.write(value);
+        }
+        res.end();
+      };
       let upstream = await doFetch();
       // token 失效：凭据文件存在时刷新续期后重试一次
       if (upstream.status === 401 && tokenFile) {
         await auth.refresh();
         upstream = await doFetch();
       }
-      res.statusCode = upstream.status;
-      const contentType = upstream.headers.get('content-type');
-      if (contentType) res.setHeader('Content-Type', contentType);
-      for (const name of RESPONSE_HEADERS) {
-        const value = upstream.headers.get(name);
-        if (value) res.setHeader(name, value);
-      }
-      // 流式回写：SSE 事件到达即推给浏览器，不整体缓冲
       const reader = upstream.body?.getReader();
-      if (!reader) {
+      // 非 200：原样透传状态与响应体（401/400 等错误体对客户端排障有用，不重试）
+      if (upstream.status !== 200 || !reader) {
+        res.statusCode = upstream.status;
+        const contentType = upstream.headers.get('content-type');
+        if (contentType) res.setHeader('Content-Type', contentType);
+        for (const name of RESPONSE_HEADERS) {
+          const value = upstream.headers.get(name);
+          if (value) res.setHeader(name, value);
+        }
+        if (reader) {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            res.write(value);
+          }
+        }
         res.end();
         return;
       }
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        res.write(value);
+      // 预读首块判别 WAF 回显（200 + 请求头回显 JSON，合法 JSON-RPC 必以
+      // {"jsonrpc" / event: / data: / : ping 开头）
+      const first = await reader.read();
+      const head =
+        first.value && first.value.length > 0
+          ? Buffer.from(first.value.slice(0, 32)).toString('utf-8')
+          : '';
+      const wafEcho = !first.done && head !== '' && !JSONRPC_BODY_PREFIXES.some((p) => head.startsWith(p));
+      if (!wafEcho) {
+        // 正常响应：熔断复位
+        wafBreaker.strikes = 0;
+        wafBreaker.cooldownUntil = 0;
+        await streamUpstream(upstream, reader, first);
+        return;
       }
-      res.end();
+      // WAF 影子封禁：触发熔断 —— 从现在起完全静默冷却（时长指数递增），
+      // 冷却期内所有请求快速失败；严禁短间隔重试（任何请求都会续封）
+      wafBreaker.strikes += 1;
+      const cooldownMs = Math.min(WAF_COOLDOWN_MS * 2 ** (wafBreaker.strikes - 1), WAF_COOLDOWN_MAX_MS);
+      wafBreaker.cooldownUntil = Date.now() + cooldownMs;
+      await reader.cancel().catch(() => undefined);
+      res.statusCode = 502;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(
+        JSON.stringify({
+          error: 'TZZB_MCP_WAF_ECHO',
+          cooldownMs,
+          message: `上游防护（WAF）触发影子封禁，代理将静默 ${Math.round(cooldownMs / 60_000)} 分钟后自动探测恢复；期间请勿频繁手动同步`,
+        }),
+      );
     } catch (error) {
       res.statusCode = 502;
       res.end(JSON.stringify({ error: 'TZZB_MCP_UPSTREAM_FAILED', message: String(error) }));
@@ -588,23 +614,22 @@ const createTzzbMcpMiddleware =
 
 /**
  * Vite 插件：dev / preview server 挂载投资账本 MCP 同源代理
- * @param envTarget .env.local 的上游 MCP endpoint（兜底；用户配置文件 tzzb-mcp.config.local.json 优先）
  * @param envToken 可选静态 Bearer token（.env.local 兜底）
  * @param tokenFile 可选凭据文件路径（.env.local 的 TZZB_MCP_TOKEN_FILE，优先于静态 token）
  * @returns Vite 插件对象
  */
-export const tzzbMcpProxyPlugin = (envTarget?: string, envToken?: string, tokenFile?: string): Plugin => {
-  /** 生效 target：用户配置文件优先，.env.local 兜底（每次请求时解析，编辑即生效）
-   * @returns 生效的上游 endpoint；都未配置时 undefined
+export const tzzbMcpProxyPlugin = (envToken?: string, tokenFile?: string): Plugin => {
+  /** 生效 target：正式环境已发布，写死 OFFICIAL_MCP_ENDPOINT
+   * @returns 正式环境上游 endpoint
    */
-  const getTarget: ValueGetter = () => loadConfigFile().url?.trim() || envTarget?.trim() || undefined;
-  /** 生效静态 token：用户配置文件优先，.env.local 兜底
-   * @returns 生效的静态 Bearer token；都未配置时 undefined
+  const getTarget: ValueGetter = () => OFFICIAL_MCP_ENDPOINT;
+  /** 生效静态 token：.env.local 兜底
+   * @returns 生效的静态 Bearer token；未配置时 undefined
    */
-  const getToken: ValueGetter = () => loadConfigFile().token?.trim() || envToken?.trim() || undefined;
+  const getToken: ValueGetter = () => envToken?.trim() || undefined;
   const auth = createAuthProvider(getTarget, tokenFile);
   const authFlow = createAuthFlowStarter(getTarget, tokenFile);
-  const middleware = createTzzbMcpMiddleware(envTarget, getTarget, getToken, tokenFile, auth, authFlow);
+  const middleware = createTzzbMcpMiddleware(getTarget, getToken, tokenFile, auth, authFlow);
   return {
     name: 'tzzb-mcp-proxy',
     configureServer(server) {

@@ -65,6 +65,9 @@ export const CHART_LINE_RED = '#ef4444';
 /** 固定曲线色：青绿（主题色系，不随主题色变化；市场宽度 ARMS 曲线） */
 export const CHART_LINE_TEAL = '#0e9488';
 
+/** 固定曲线色 · 黄（账户分析仓位副图、回撤背景、上证指数对比线） */
+export const CHART_LINE_YELLOW = '#f59e0b';
+
 /** 金价柱色 · 金（足金饰品价柱，当日金价卡） */
 export const CHART_GOLD = '#d4a72c';
 

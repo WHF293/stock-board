@@ -18,7 +18,6 @@ import { buildClearedPositionAnalysisPrompt } from '../../../../common/utils/bui
 import { findMaxDrawdown } from '../../../../common/utils/find-max-drawdown';
 import type { RankDataset } from '../../../../common/types/rank-dataset.types';
 import {
-  TZZB_MCP_LIVE,
   getTzzbAccounts,
   getTzzbAssetChange,
   getTzzbClearedPositions,
@@ -31,6 +30,7 @@ import {
   getTzzbStockTrades,
   getTzzbSyncMeta,
   getTzzbYearPoints,
+  setTzzbAccountScope,
 } from '../../../../common/api/tzzb.api.ts';
 import { useRouter } from 'vue-router';
 import { useStockOpen } from '../../../../common/composables/use-stock-open';
@@ -99,11 +99,19 @@ const customTo = ref('2026-10-23');
 /** 区间展示名（指标行「区间盈亏」副标题用） */
 const rangeLabel = computed(() => TZZB_RANGE_LABEL[range.value] ?? '本月');
 
-/** 区间变化 → 重拉资产曲线汇总（mock 阶段采样不变，正式接入按区间传参） */
+/** 区间变化 → 重拉资产曲线汇总（失败浮窗提示，成功静默替换；旧数据保留避免闪空） */
 watch([range, customFrom, customTo], ([r, from, to]) => {
   if (r !== 'custom' || (from && to)) {
     void getTzzbPnlSummary(r).then((v) => {
-      if (v) pnl.value = v;
+      if (v) {
+        pnl.value = v;
+      } else {
+        notifications.push({
+          title: '资产曲线区间数据拉取失败',
+          body: `「${TZZB_RANGE_LABEL[r] ?? r}」区间数据未更新，仍显示上一区间；请稍后重新同步`,
+          tone: NOTIFY_TONE.DOWN,
+        });
+      }
     });
   }
 });
@@ -502,22 +510,51 @@ const selectedName = computed(
 
 /* ---------------- 加载 ---------------- */
 
-/** 拉取全部模块（并行；单模块失败不影响其余，各自落空态） */
-const loadAll = async (): Promise<void> => {
-  loading.value = true;
+/** 同步任务总数（loadAll 并行任务数，进度条分母） */
+const SYNC_TASK_TOTAL = 12;
+
+/** 错峰启动间隔（毫秒）：上游 WAF 对瞬时并发敏感，逐个延迟启动降低触发概率 */
+const SYNC_STAGGER_MS = 250;
+
+/** 同步进度（null = 未在同步；done/total 驱动顶栏进度条） */
+const syncProgress = ref<{ done: number; total: number } | null>(null);
+
+/**
+ * 拉取全部模块（并行错峰启动；单模块失败不影响其余，各自落空态）
+ * @param mode skeleton = 首载（显示骨架屏）；silent = 手动同步 / 切账户（保留旧数据，只走进度条）
+ */
+const loadAll = async (mode: 'skeleton' | 'silent' = 'skeleton'): Promise<void> => {
+  if (mode === 'skeleton') loading.value = true;
+  syncProgress.value = { done: 0, total: SYNC_TASK_TOTAL };
+  let done = 0;
+  /** 单任务完成时推进进度条 */
+  const bump = (): void => {
+    done += 1;
+    syncProgress.value = { done, total: SYNC_TASK_TOTAL };
+  };
+  /**
+   * 错峰启动：按序延迟发起，避开瞬时并发触发上游 WAF
+   * @param task 数据拉取任务
+   * @param index 启动序号（决定延迟档位）
+   * @returns 原任务 promise（完成时已推进进度条）
+   */
+  const stagger = <T,>(task: Promise<T>, index: number): Promise<T> =>
+    new Promise<void>((resolve) => setTimeout(resolve, index * SYNC_STAGGER_MS)).then(() =>
+      task.finally(bump),
+    );
   const results = await Promise.allSettled([
-    getTzzbAccounts(),
-    getTzzbSyncMeta(),
-    getTzzbPnlSummary(),
-    getTzzbPositionSummary(),
-    getTzzbAssetChange(),
-    getTzzbDayCalendar('202610'),
-    getTzzbMonthCalendar('2026'),
-    getTzzbYearPoints(['2026', '2025']),
-    getTzzbClearedPositions(),
-    getTzzbFundHoldingReturns(),
-    loadAllStockTrades(),
-    getTzzbFundTrades('2026-09'),
+    stagger(getTzzbAccounts(), 0),
+    stagger(getTzzbSyncMeta(), 1),
+    stagger(getTzzbPnlSummary(), 2),
+    stagger(getTzzbPositionSummary(), 3),
+    stagger(getTzzbAssetChange(), 4),
+    stagger(getTzzbDayCalendar(dayjs().format('YYYYMM')), 5),
+    stagger(getTzzbMonthCalendar(dayjs().format('YYYY')), 6),
+    stagger(getTzzbYearPoints([dayjs().format('YYYY'), dayjs().subtract(1, 'year').format('YYYY')]), 7),
+    stagger(getTzzbClearedPositions(), 8),
+    stagger(getTzzbFundHoldingReturns(), 9),
+    stagger(loadAllStockTrades(), 10),
+    stagger(getTzzbFundTrades(dayjs().format('YYYY-MM')), 11),
   ]);
   const [acc, meta, pnlR, posR, chgR, dayR, monR, yearR, clrR, fundRetR, tradeR, fundTradeR] =
     results;
@@ -537,7 +574,8 @@ const loadAll = async (): Promise<void> => {
     allStockTrades.value = tradeR.value?.list ?? null;
   }
   if (fundTradeR.status === 'fulfilled') fundTrades.value = fundTradeR.value;
-  loading.value = false;
+  syncProgress.value = null;
+  if (mode === 'skeleton') loading.value = false;
 };
 
 onMounted(() => {
@@ -547,19 +585,25 @@ onMounted(() => {
 /* ---------------- 交互 ---------------- */
 
 /**
- * 切换账户（mock 阶段仅更新选中态；正式接入后按账户重拉各模块）
+ * 切换账户：设置数据层账户范围后整体静默重拉（进度条反馈，不闪骨架屏）
  * @param id 账户 id；'' = 全部账户
  */
 const onSelectAccount = (id: string): void => {
+  if (id === selectedId.value) return;
   selectedId.value = id;
+  setTzzbAccountScope(id || null);
+  syncing.value = true;
+  void loadAll('silent').finally(() => {
+    syncing.value = false;
+  });
 };
 
 /**
- * 手动同步（mock 阶段模拟一次重拉）
+ * 手动同步：静默重拉（保留旧数据 + 进度条，不再闪骨架屏）
  */
 const onSync = async (): Promise<void> => {
   syncing.value = true;
-  await loadAll();
+  await loadAll('silent');
   syncing.value = false;
 };
 
@@ -619,11 +663,7 @@ const openStockDetailPage = (code: string): void => {
   <div class="flex flex-col gap-3">
     <NoticeBar
       class="shrink-0"
-      :text="
-        TZZB_MCP_LIVE
-          ? `真实数据：同花顺投资账本 MCP 直连 · 当前 ${selectedName} · 切换账户 / 区间按真实接口重拉`
-          : '未配置投资账本 MCP：请在 .env.local 设置 VITE_TZZB_MCP_URL / VITE_TZZB_MCP_PROXY=1 后重启 dev server'
-      "
+      :text="`真实数据：同花顺投资账本 MCP 直连（正式环境） · 当前 ${selectedName} · 切换账户 / 区间按真实接口重拉`"
     />
 
     <!-- 顶栏：账户选择器 + 同步状态 -->
@@ -636,6 +676,18 @@ const openStockDetailPage = (code: string): void => {
         @select="onSelectAccount"
         @sync="onSync"
       />
+      <!-- 同步进度条：手动同步 / 切账户重拉时替代骨架屏（旧数据保持可见） -->
+      <div v-if="syncProgress" class="mt-2 flex items-center gap-2.5">
+        <div class="h-1.5 flex-1 overflow-hidden rounded-full bg-flat-weak">
+          <div
+            class="h-full rounded-full bg-primary transition-all duration-300"
+            :style="{ width: `${(syncProgress.done / syncProgress.total) * 100}%` }"
+          />
+        </div>
+        <span class="shrink-0 font-mono text-xs text-text-tertiary">
+          正在同步 {{ syncProgress.done }}/{{ syncProgress.total }}
+        </span>
+      </div>
     </div>
 
     <!-- 骨架（首载） -->
@@ -750,6 +802,7 @@ const openStockDetailPage = (code: string): void => {
         <TzzbTradeRecords
           :tab="tradeTab"
           :stock-trades="stockTrades"
+          :all-stock-trades="allStockTrades"
           :fund-trades="fundTrades"
           @page="onTradePage"
         />
