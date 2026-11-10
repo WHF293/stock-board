@@ -1053,12 +1053,11 @@ const onProbeProxy = async (): Promise<void> => {
         <div>
           <p class="text-sm text-text">导入数据</p>
           <p class="mt-0.5 text-xs text-text-tertiary">
-            {{ dataPortAvailable ? "从导出文件恢复，覆盖前自动备份并需二次确认" : "仅桌面端可用（浏览器端无本地数据库）" }}
+            {{ dataPortAvailable ? "从导出文件或粘贴的 JSON 恢复，覆盖前自动备份并需二次确认" : "粘贴导出的 JSON 恢复设置类数据（浏览器端无本地数据库，文件导入需桌面端）" }}
           </p>
         </div>
         <BaseButton
           variant="ghost"
-          :disabled="!dataPortAvailable"
           @click="dataImportOpen = true"
         >
           导入

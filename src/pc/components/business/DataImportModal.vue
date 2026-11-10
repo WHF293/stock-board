@@ -3,9 +3,11 @@ import { computed, ref, watch } from 'vue';
 import BaseButton from '../ui/BaseButton.vue';
 import BaseModal from '../ui/BaseModal.vue';
 import BaseConfirmModal from '../ui/BaseConfirmModal.vue';
+import BaseTabs from '../ui/BaseTabs.vue';
 import {
   importDataPort,
   isDataPortAvailable,
+  parseImportJson,
   pickAndParseImportFile,
   summarizeImportFile,
 } from '../../../common/api/data-port.api.ts';
@@ -16,17 +18,38 @@ import type { DataPortFile } from '../../../common/types/data-port.types.ts';
 /**
  * 数据导入弹窗（设置页「数据迁移」卡片的「导入」按钮触发）
  *
- * 三步：选导出文件 → 勾选要恢复的类别（仅文件中实际包含的）→ 二级确认后覆盖写入。
- * 导入前自动备份涉及的 SQLite 库（appDataDir/backups），完成后整页 reload 重新水合。
+ * 双通道：选导出文件 / 粘贴 JSON 文本（PC「复制 JSON 片段」的原文），解析后共用同一套
+ * 预览勾选 → 二级确认 → 覆盖写入流程。导入前自动备份涉及的 SQLite 库（appDataDir/backups），
+ * 完成后整页 reload 重新水合。浏览器端无 SQLite，仅设置类（localStorage）数据可导入。
  */
 
 const open = defineModel<boolean>('open', { required: true });
 
-/** 桌面端才有 SQLite 数据源，浏览器端禁用导入 */
+/** 桌面端才有 SQLite 数据源；浏览器端文件选择与 SQLite 类别不可用，粘贴通道仍可恢复设置类数据 */
 const available = isDataPortAvailable();
 
-/** 解析后的导出文件（null = 尚未选择） */
+/** 导入通道：file 选文件 / paste 粘贴 JSON */
+const importMode = ref<'file' | 'paste'>('file');
+
+/** BaseTabs 桥接：通道字面量 ↔ 字符串 value */
+const importModeModel = computed<string>({
+  get: () => importMode.value,
+  set: (value) => {
+    importMode.value = value === 'paste' ? 'paste' : 'file';
+  },
+});
+
+/** 导入通道选项 */
+const IMPORT_MODE_OPTIONS = [
+  { label: '选择文件', value: 'file' },
+  { label: '粘贴 JSON', value: 'paste' },
+] as const;
+
+/** 解析后的导出文件（null = 尚未选择 / 解析） */
 const file = ref<DataPortFile | null>(null);
+
+/** 粘贴通道的 JSON 原文 */
+const pasteText = ref('');
 
 /** 文件里实际包含的类别计数（类别 id → 计数表） */
 const fileCounts = ref<Record<string, Record<string, number>>>({});
@@ -46,9 +69,11 @@ const errorText = ref('');
 /** 文件里存在但当前版本不识别、将被跳过的类别数 */
 const skippedCount = ref(0);
 
-/** 可勾选类别（manifest 顺序 ∩ 文件包含） */
+/** 可勾选类别（manifest 顺序 ∩ 文件包含；浏览器端无 SQLite，过滤掉 sqlite 类别） */
 const rows = computed(() =>
-  DATA_PORT_MANIFEST.filter((c) => fileCounts.value[c.id] !== undefined).map((category) => {
+  DATA_PORT_MANIFEST.filter(
+    (c) => (available || c.storage !== 'sqlite') && fileCounts.value[c.id] !== undefined,
+  ).map((category) => {
     const counts = fileCounts.value[category.id] ?? {};
     const total = Object.values(counts).reduce((sum, n) => sum + n, 0);
     return { category, total, empty: total === 0 };
@@ -64,6 +89,8 @@ const canImport = computed(() => file.value !== null && checkedIds.value.length 
 // 打开时重置全部状态；关闭时同样清空，避免下次打开闪旧数据
 watch(open, (isOpen) => {
   if (!isOpen) return;
+  importMode.value = 'file';
+  pasteText.value = '';
   file.value = null;
   fileCounts.value = {};
   checkedIds.value = [];
@@ -71,6 +98,21 @@ watch(open, (isOpen) => {
   skippedCount.value = 0;
   confirmOpen.value = false;
 });
+
+/**
+ * 采纳解析成功的导出文件：登记文件、预览计数并播种默认勾选（选文件 / 粘贴共用）
+ * @param parsed 解析后的导出文件
+ */
+const adoptParsedFile = (parsed: DataPortFile): void => {
+  file.value = parsed;
+  fileCounts.value = summarizeImportFile(parsed);
+  checkedIds.value = rows.value
+    .filter((row) => row.category.defaultEnabled)
+    .map((row) => row.category.id);
+  skippedCount.value = parsed.categories.filter(
+    (c) => !DATA_PORT_MANIFEST.some((m) => m.id === c.id),
+  ).length;
+};
 
 /** 选择并解析导出文件 */
 const onSelectFile = async (): Promise<void> => {
@@ -81,18 +123,28 @@ const onSelectFile = async (): Promise<void> => {
   try {
     const parsed = await pickAndParseImportFile();
     if (parsed === null) return;
-    file.value = parsed;
-    fileCounts.value = summarizeImportFile(parsed);
-    checkedIds.value = DATA_PORT_MANIFEST.filter(
-      (c) => c.defaultEnabled && fileCounts.value[c.id] !== undefined,
-    ).map((c) => c.id);
-    skippedCount.value = parsed.categories.filter(
-      (c) => !DATA_PORT_MANIFEST.some((m) => m.id === c.id),
-    ).length;
+    adoptParsedFile(parsed);
   } catch (error) {
     errorText.value = error instanceof Error ? error.message : String(error);
   } finally {
     parsing.value = false;
+  }
+};
+
+/** 解析粘贴的 JSON 文本：与选文件共用同一套校验与采纳流程 */
+const onParsePaste = (): void => {
+  errorText.value = '';
+  file.value = null;
+  fileCounts.value = {};
+  const text = pasteText.value.trim();
+  if (text.length === 0) {
+    errorText.value = '请先粘贴 JSON 内容';
+    return;
+  }
+  try {
+    adoptParsedFile(parseImportJson(text));
+  } catch (error) {
+    errorText.value = error instanceof Error ? error.message : String(error);
   }
 };
 
@@ -155,8 +207,19 @@ const fileSizeText = computed(() => {
     title="导入数据"
     max-width-class="max-w-2xl"
   >
-    <!-- 第一步：选择文件 -->
-    <div class="flex items-center justify-between gap-4">
+    <!-- 通道切换：选文件（桌面端）/ 粘贴 JSON（全端） -->
+    <BaseTabs
+      v-model="importModeModel"
+      :options="IMPORT_MODE_OPTIONS"
+      aria-label="导入通道"
+      data-track="DATA_IMPORT_MODE_CHANGE"
+    />
+
+    <!-- 通道一：选择文件（依赖 Tauri 文件对话框，仅桌面端） -->
+    <div
+      v-if="importMode === 'file'"
+      class="mt-3 flex items-center justify-between gap-4"
+    >
       <div class="min-w-0">
         <p class="text-sm text-text">选择导出文件</p>
         <p class="mt-0.5 text-xs text-text-tertiary">
@@ -172,6 +235,33 @@ const fileSizeText = computed(() => {
         {{ parsing ? '解析中…' : file ? '重新选择' : '选择文件' }}
       </BaseButton>
     </div>
+
+    <!-- 通道二：粘贴 JSON 文本（PC「复制 JSON 片段」的原文；浏览器端也可恢复设置类数据） -->
+    <template v-else>
+      <p class="mt-3 text-xs text-text-tertiary">
+        粘贴「导出数据 → 复制 JSON 片段」的内容或导出文件全文
+        <template v-if="!available">
+          ；浏览器端无本地数据库，仅设置类（localStorage）数据可导入
+        </template>
+      </p>
+      <textarea
+        v-model="pasteText"
+        rows="6"
+        placeholder="粘贴 JSON 片段或导出文件全文"
+        class="mt-2 w-full resize-y rounded-lg border border-flat-weak bg-transparent px-3 py-2 font-mono text-xs text-text outline-none focus:border-primary"
+        aria-label="粘贴 JSON 内容"
+      />
+      <div class="mt-2 flex justify-end">
+        <BaseButton
+          variant="ghost"
+          data-track="DATA_IMPORT_PASTE_PARSE"
+          :disabled="importing"
+          @click="onParsePaste"
+        >
+          解析并预览
+        </BaseButton>
+      </div>
+    </template>
 
     <!-- 第二步：文件预览 + 勾选恢复类别 -->
     <template v-if="file">
