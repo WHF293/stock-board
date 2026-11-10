@@ -35,11 +35,22 @@ import {
 /** 客户端开关：正式环境已发布，MCP 通道恒开启（历史 dev 开关，保留常量避免调用方大改） */
 export const TZZB_MCP_LIVE: boolean = true;
 
-/** MCP 同源代理路径（server/tzzb-mcp-proxy.ts 挂载） */
+/** MCP 同源代理路径（server/tzzb-mcp-proxy.ts 挂载；打包版无 dev server 走直连，见 tzzb-direct.ts） */
 const MCP_PROXY_PATH = '/tzzb-mcp';
 
-/** 正式环境 MCP endpoint（写死正式域名，换环境只改此处与 server/tzzb-mcp-proxy.ts） */
-export const TZZB_MCP_ENDPOINT = 'https://tzzb.10jqka.com.cn/mcp';
+/** 正式环境 endpoint 常量单一定义在 tzzb-direct.ts（直连模块同样需要），此处原样转出 */
+export { TZZB_MCP_ENDPOINT } from './tzzb-direct.ts';
+
+import {
+  TZZB_USE_DIRECT,
+  directAuthClear,
+  directAuthInfo,
+  directAuthStart,
+  directRpcPost,
+} from './tzzb-direct.ts';
+
+/** 直连模式：打包版 Tauri（无 vite dev server，/tzzb-mcp 不存在，必须直连上游） */
+const USE_DIRECT = TZZB_USE_DIRECT;
 
 /* ---------------- MCP Streamable HTTP 客户端 ---------------- */
 
@@ -84,6 +95,8 @@ const postRpc = async (
   payload: Record<string, unknown>,
   needSession: boolean,
 ): Promise<{ json: Record<string, unknown>; sessionId?: string }> => {
+  // 打包版直连：token 注入 / 401 续期重试在 tzzb-direct 内完成
+  if (USE_DIRECT) return directRpcPost(payload, needSession, mcpSessionId);
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     Accept: 'application/json, text/event-stream',
@@ -844,6 +857,8 @@ const DIRECT_LABEL = 'MCP 直连';
  * @returns 毫秒时间戳；未配置代理 / 请求失败时返回 null
  */
 export const fetchAuthorizedAt = async (): Promise<number | null> => {
+  // 打包版直连：凭据在前端 localStorage，读本地状态即可
+  if (USE_DIRECT) return directAuthInfo().authorizedAt;
   try {
     const res = await fetch(`${MCP_PROXY_PATH}/auth-info`);
     if (!res.ok) return null;
@@ -865,6 +880,8 @@ export const fetchAuthorizedAt = async (): Promise<number | null> => {
  * @throws 鉴权流未配置（TZZB_MCP_NOT_CONFIGURED）/ 注册失败等（错误码或上游错误摘要）
  */
 export const startTzzbMcpAuth = async (): Promise<TzzbMcpAuthStartResult> => {
+  // 打包版直连：注册 / PKCE / 回环回调（Rust 命令）/ code 交换全在前端与 Rust 侧完成
+  if (USE_DIRECT) return directAuthStart();
   const res = await fetch(`${MCP_PROXY_PATH}/auth-start`, { method: 'POST' });
   const json = (await res.json().catch(() => ({}))) as TzzbAuthStart;
   if (!res.ok) {
@@ -884,6 +901,11 @@ export const startTzzbMcpAuth = async (): Promise<TzzbMcpAuthStartResult> => {
  * @throws 清空失败（未配置凭据文件 / 落盘失败）
  */
 export const clearTzzbMcpAuth = async (): Promise<void> => {
+  // 打包版直连：清前端 localStorage 凭据
+  if (USE_DIRECT) {
+    directAuthClear();
+    return;
+  }
   const res = await fetch(`${MCP_PROXY_PATH}/auth-clear`, { method: 'POST' });
   const json = (await res.json().catch(() => ({}))) as TzzbAuthClear;
   if (!res.ok || json.error) throw new Error(json.error ?? `auth-clear HTTP ${res.status}`);
@@ -901,8 +923,12 @@ export const waitTzzbMcpAuthorized = (sinceMs: number, timeoutMs: number = AUTH_
     const startedAt = Date.now();
     const tick = async (): Promise<void> => {
       try {
-        const res = await fetch(`${MCP_PROXY_PATH}/auth-info`);
-        const json = (await res.json().catch(() => ({}))) as TzzbAuthInfo;
+        // 打包版直连：轮询前端凭据状态（auth_error / authorized_at 由直连鉴权流维护）
+        const json: TzzbAuthInfo = USE_DIRECT
+          ? directAuthInfo()
+          : await fetch(`${MCP_PROXY_PATH}/auth-info`)
+              .then((res) => res.json().catch(() => ({})) as TzzbAuthInfo)
+              .catch(() => ({}));
         if (json.authError) {
           reject(new Error(json.authError));
           return;

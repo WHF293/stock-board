@@ -9,6 +9,7 @@ use tauri::{Manager, State};
 use tauri_plugin_sql::{Migration, MigrationKind};
 
 mod mobile_update;
+mod tzzb_loopback;
 mod window_syscmd;
 
 /// 「关闭按钮最小化到托盘」开关（前端设置页经 `set_close_to_tray` 命令实时同步；
@@ -1042,6 +1043,7 @@ pub fn run() {
       set_close_to_tray,
       get_work_area,
       install_update,
+      tzzb_loopback::tzzb_wait_loopback_callback,
       mobile_update::download_apk,
       mobile_update::apk_download_status,
       mobile_update::install_apk
