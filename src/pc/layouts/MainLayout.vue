@@ -177,6 +177,16 @@ const pluginMenuItems = computed<SidebarMenuEntry[]>(() => {
 });
 
 /**
+ * 插件内核 revision（挂载 / 升级 / 卸载时自增）。
+ * 拼进页面 KeepAlive 的 key：插件覆盖安装 / 卸载重装后同路径页面强制重建，
+ * 否则 KeepAlive 按 path 命中旧实例，升级后页面一直渲染旧代码（2026-11-10 历史牛熊 1.3.0 实测踩坑）。
+ */
+const pluginKernelRevision = computed(() => {
+  void pluginKernel.revision.value;
+  return pluginKernel.revision.value;
+});
+
+/**
  * 按用户编排顺序渲染的菜单项
  *
  * 顺序规则收敛在 `orderSidebarMenu`（而不是写在这里）：宿主在「插件页随插件
@@ -979,12 +989,13 @@ void marketStatusStore.refresh();
             class="@container h-full w-full"
             :class="pageFullscreen ? 'pc-page-fs flex min-h-0 flex-col p-3' : 'mx-auto max-w-[1600px]'"
           >
-            <!-- 页面切换：KeepAlive 缓存页面状态；进入动画由 pageAnim 类名驱动（无离场状态机） -->
+            <!-- 页面切换：KeepAlive 缓存页面状态；进入动画由 pageAnim 类名驱动（无离场状态机）。
+                 key 拼插件内核 revision：插件升级 / 重装后同路径页面强制重建实例（旧代码不残留） -->
             <RouterView v-slot="{ Component, route: routeRecord }">
               <KeepAlive>
                 <component
                   :is="Component"
-                  :key="routeRecord.path"
+                  :key="`${routeRecord.path}#${pluginKernelRevision}`"
                   :class="pageAnim"
                 />
               </KeepAlive>
