@@ -99,6 +99,7 @@ cursor-help
 cursor-pointer
 datacenter-web.eastmoney.com/api/data/get
 datacenter-web.eastmoney.com/api/data/v1/get
+decoration-dotted
 div
 duration-200
 duration-300
@@ -162,6 +163,7 @@ h-[150px]
 h-[190px]
 h-[220px]
 h-[300px]
+h-[420px]
 h-full
 host/constants/market-data.constants.ts
 hover:bg-flat-weak
@@ -234,6 +236,7 @@ modules/vue-draggable-plus/dist/vue-draggable-plus.js
 modules/zod/v4/core/json-schema-processors.js
 modules/zod/v4/core/to-json-schema.js
 mr-1
+mr-2
 mr-auto
 mt-0.5
 mt-1
@@ -478,11 +481,13 @@ transition-colors
 transition-opacity
 transition-transform
 truncate
+underline-offset-2
 utils/format-amount.ts
 w-1
 w-1.5
 w-12
 w-16
+w-2
 w-2.5
 w-24
 w-3

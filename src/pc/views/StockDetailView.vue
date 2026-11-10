@@ -733,21 +733,22 @@ const pctClass = (value: number | null): string =>
         </div>
       </BaseCard>
 
-      <!-- 右侧信息栏：筹码分布（2026-11-02 王总指定与五档盘口换位并加高：fill 撑满
-           右栏剩余高度）+ 五档盘口，两卡白底实色（王总 2026-10-22 指定）。
-           报价指标 2026-11-02 起整合进顶栏；本栏固定不收起（2026-11-02 王总指定） -->
-      <div class="flex w-80 shrink-0 flex-col gap-3 overflow-y-auto">
+      <!-- 右侧信息栏：筹码分布 + 五档盘口，两卡白底实色（王总 2026-10-22 指定）。
+           报价指标 2026-11-02 起整合进顶栏；本栏固定不收起（2026-11-02 王总指定）。
+           2026-11-10 王总指定：两卡宽高写死（宽 = 栏 w-80，筹码分布 h-480px /
+           五档盘口 h-300px），窗口缩小时不压缩、不消失；整栏放不下时随主区滚动 -->
+      <div class="flex w-80 shrink-0 flex-col gap-3">
         <!-- 筹码分布：重接口不轮询，东财 CYQ 算法本地推演；
              说明改为标题旁问号 hover（2026-11-02 王总指定），不再放正文底部 -->
         <BaseCard
           title="筹码分布"
           fill
-          class="min-h-0 flex-1"
+          class="h-[480px] shrink-0"
           tip="红 = 现价下方获利筹码，绿 = 上方套牢筹码；90 / 70 成本为筹码占比 90% / 70% 的价格区间，集中度越小筹码越集中"
         >
           <ChipDistributionCard :symbol="symbol" :current-price="quoteRef?.price ?? null" />
         </BaseCard>
-        <BaseCard title="五档盘口" class="shrink-0">
+        <BaseCard title="五档盘口" class="h-[300px] shrink-0">
           <StockOrderBook :quote="quoteRef" />
         </BaseCard>
       </div>

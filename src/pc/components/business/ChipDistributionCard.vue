@@ -23,7 +23,8 @@ import type { ChipDistributionItem } from '../../../common/api/chip-distribution
  * 服务端无现成接口；原 SDK `chips` 走东财日 K 源在本机被掐，见 api 层注释）：
  * 统计行取序列末行（获利比例 / 平均成本 / 90%·70% 成本区间与集中度），
  * 筹码峰直方图为最新一日 150 档占比分布——现价之下的筹码（获利盘）红色、
- * 之上（套牢盘）绿色，与东财 App 口径一致。重接口不轮询，符号变化即重拉。
+ * 之上（套牢盘）绿色，与东财 App 口径一致；全量显示不裁剪
+ * （2026-11-10 王总最终指定）。重接口不轮询，符号变化即重拉。
  *
  * ETF（2026-11-06 王总指定放行）：换手率分母 = 基金份额（行情源流通市值 ÷ 现价
  * 推演的最新披露值，固定分母近似，见 api 层注释），正常渲染分布并在顶部加
@@ -53,31 +54,32 @@ const latest = computed<ChipDistributionItem | null>(() => rows.value.at(-1) ?? 
 /** 直方图（仅末行附带） */
 const histogram = computed(() => latest.value?.histogram ?? null);
 
-/** 直方图柱高归一基准（最大占比） */
-const maxRatio = computed(() => Math.max(...(histogram.value?.ratios ?? [0])));
-
-/** 直方图价格档（高位在前，供竖排渲染：上 = 高价 / 下 = 低价） */
-const reversedPrices = computed<number[]>(() =>
-  [...(histogram.value?.prices ?? [])].reverse(),
-);
-
 /**
- * 竖排柱的占比（reversedPrices 与原 ratios 下标反向对齐）
- * @param displayIndex 竖排行下标（0 = 最高价档）
- * @returns 该档占比
+ * 渲染档位（2026-11-10 王总最终指定：全量显示，不裁剪，高位在前）
+ *
+ * 150 档全渲染（此前试过相对阈值裁剪 / 90% 成本区间窗口，均被否）；
+ * 单边行情 / 份额拆分时上方空档属于真实分布形态，如实展示。
+ * @returns 渲染档位数组（[0] 为最高价档，price 价格 / ratio 占比）
  */
-const ratioAt = (displayIndex: number): number => {
-  const ratios = histogram.value?.ratios ?? [];
-  return ratios[ratios.length - 1 - displayIndex] ?? 0;
-};
-
-/** 现价分界行在竖排序列中的下标（= 套牢盘档数，分界线插在获利/套牢之间）；无现价或单侧无筹码时为 null */
-const profitBoundaryIndex = computed<number | null>(() => {
+const displayLevels = computed<Array<{ price: number; ratio: number }>>(() => {
   const prices = histogram.value?.prices ?? [];
+  const ratios = histogram.value?.ratios ?? [];
+  const levels: Array<{ price: number; ratio: number }> = [];
+  for (let index = prices.length - 1; index >= 0; index -= 1) {
+    levels.push({ price: prices[index], ratio: ratios[index] });
+  }
+  return levels;
+});
+
+/** 渲染档位的占比最大值（柱宽归一基准，裁剪后重算避免小档位全被压扁） */
+const maxRatio = computed(() => Math.max(...displayLevels.value.map((level) => level.ratio), 0));
+
+/** 现价分界行在渲染档位中的下标（= 套牢盘档数，分界线插在获利/套牢之间）；无现价或单侧无筹码时为 null */
+const profitBoundaryIndex = computed<number | null>(() => {
   const current = props.currentPrice;
-  if (current === null || prices.length === 0) return null;
-  const trappedCount = prices.filter((price) => price >= current).length;
-  return trappedCount > 0 && trappedCount < prices.length ? trappedCount : null;
+  if (current === null) return null;
+  const trappedCount = displayLevels.value.filter((level) => level.price >= current).length;
+  return trappedCount > 0 && trappedCount < displayLevels.value.length ? trappedCount : null;
 });
 
 /**
@@ -139,8 +141,9 @@ watch(() => props.symbol, () => void load(), { immediate: true });
   />
   <BaseEmpty v-else-if="isError || rows.length === 0" text="筹码分布暂无数据（上游可能限频，稍后重开面板重试）" />
   <!-- 根节点 flex-1：配合外层 BaseCard fill 撑满右栏剩余高度（2026-11-02 王总指定加高）；
-       overflow-y-auto：窗口高度不足时本卡内部滚动，内容不再溢出压到「五档盘口」卡上 -->
-  <div v-else class="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto">
+       overflow-hidden：卡内禁止滚动条（2026-11-10 王总指定），直方图区随剩余高度
+       自动压缩（无 min 高度下限），任意窗口高度都完整渲染不溢出 -->
+  <div v-else class="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden">
     <!-- ETF 失真警示条（2026-11-06 王总指定）：份额取最新披露近似，未含一级申赎；
          样式随全站「注意类提示」范式（text-text-tertiary + role="note"，主题无警示色 token） -->
     <p v-if="isEtf" class="shrink-0 text-[10px] leading-snug text-text-tertiary" role="note">
@@ -156,10 +159,12 @@ watch(() => props.symbol, () => void load(), { immediate: true });
     <!-- 筹码峰直方图（2026-11-02 王总指定改竖排，东财官网样式）：
          价格轴竖放（高价在上 / 低价在下），柱沿水平方向伸展，宽度 = 占比；
          红 = 现价下方获利盘 / 绿 = 上方套牢盘，虚线为现价分界。
-         min-h-44 + flex-1：卡片有富余高度时直方图随之拉伸 -->
+         全量 150 档显示（2026-11-10 王总最终指定不裁剪）。
+         flex-1 吃剩余高度、min-h-0 允许压缩（卡内不滚动：
+         档位多时每根柱变薄但全部档位完整渲染，不出滚动条） -->
     <div class="flex min-h-0 flex-1 flex-col gap-1">
-      <div class="flex min-h-44 flex-1 flex-col">
-        <template v-for="(price, index) in reversedPrices" :key="price">
+      <div class="flex min-h-0 flex-1 flex-col">
+        <template v-for="(level, index) in displayLevels" :key="level.price">
           <div
             v-if="index === profitBoundaryIndex"
             class="relative shrink-0 border-t border-dashed border-text-tertiary"
@@ -172,19 +177,19 @@ watch(() => props.symbol, () => void load(), { immediate: true });
             <div
               class="min-w-0"
               :style="{
-                width: `${(ratioAt(index) / maxRatio) * 100}%`,
-                background: barColor(price),
+                width: `${(level.ratio / maxRatio) * 100}%`,
+                background: barColor(level.price),
                 opacity: 0.85,
               }"
             />
           </div>
         </template>
       </div>
-      <div class="flex items-center justify-between text-[10px] text-text-tertiary tabular-nums">
-        <span>低 {{ histogram?.prices[0] ?? '' }}</span>
+      <div class="flex shrink-0 items-center justify-between text-[10px] text-text-tertiary tabular-nums">
+        <span>低 {{ displayLevels.at(-1)?.price ?? '' }}</span>
         <!-- 统计日期（原底部说明行随 2026-11-02 改版迁标题问号 tooltip，日期留在此处展示） -->
         <span>截至 {{ latest?.date ?? '' }}</span>
-        <span>高 {{ histogram?.prices.at(-1) ?? '' }}</span>
+        <span>高 {{ displayLevels[0]?.price ?? '' }}</span>
       </div>
     </div>
   </div>

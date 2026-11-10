@@ -303,21 +303,21 @@ const dayLabel = (date: string): string => `${date.slice(4, 6)}-${date.slice(6, 
             />
             <div
               v-else
-              class="min-h-16 rounded-lg px-2 py-1.5"
+              class="flex min-h-[4.5rem] flex-col justify-center rounded-lg px-2 py-1.5"
               :class="[cell.profit ? plBgClass(cell.profit) : 'bg-flat-weak/50']"
             >
               <p class="font-mono text-xs text-text-tertiary">{{ cell.day }}</p>
               <template v-if="cell.profit">
                 <p
                   v-if="showProfit"
-                  class="mt-1 text-right font-mono text-xs font-semibold tabular-nums"
+                  class="text-right font-mono text-sm font-semibold tabular-nums"
                   :class="plClass(cell.profit)"
                 >
                   {{ signYuan(cell.profit) }}
                 </p>
                 <p
                   class="text-right font-mono tabular-nums"
-                  :class="showProfit ? 'text-[10px] text-text-tertiary' : 'mt-1 text-xs font-semibold ' + plClass(cell.profit)"
+                  :class="showProfit ? 'text-xs text-text-tertiary' : 'mt-1 text-sm font-semibold ' + plClass(cell.profit)"
                 >
                   {{ ((cell.rate ?? 0) * 100).toFixed(2) }}%
                 </p>
@@ -366,14 +366,14 @@ const dayLabel = (date: string): string => `${date.slice(4, 6)}-${date.slice(6, 
             </p>
             <p
               v-if="cell.profit !== undefined && showProfit"
-              class="mt-1.5 font-mono text-base font-semibold tabular-nums"
+              class="mt-1.5 font-mono text-lg font-semibold tabular-nums"
               :class="plClass(cell.profit)"
             >
               {{ signYuan(cell.profit) }}
             </p>
             <p
               v-else-if="cell.profit !== undefined"
-              class="mt-1.5 font-mono text-base font-semibold tabular-nums"
+              class="mt-1.5 font-mono text-lg font-semibold tabular-nums"
               :class="plClass(cell.profit)"
             >
               {{ ((cell.rate ?? 0) * 100).toFixed(2) }}%
@@ -381,7 +381,7 @@ const dayLabel = (date: string): string => `${date.slice(4, 6)}-${date.slice(6, 
             <p v-else class="mt-1.5 text-xs text-text-tertiary">
               {{ cell.future ? '未至' : '无同步数据' }}
             </p>
-            <p v-if="cell.profit !== undefined && showProfit && showRate" class="font-mono text-xs text-text-tertiary">
+            <p v-if="cell.profit !== undefined && showProfit && showRate" class="font-mono text-sm text-text-tertiary">
               {{ ((cell.rate ?? 0) * 100).toFixed(2) }}%
             </p>
           </button>
@@ -405,15 +405,15 @@ const dayLabel = (date: string): string => `${date.slice(4, 6)}-${date.slice(6, 
               <p class="text-sm font-semibold text-text">{{ point.year }} 年</p>
               <p
                 v-if="showProfit"
-                class="mt-1.5 font-mono text-base font-semibold tabular-nums"
+                class="mt-1.5 font-mono text-lg font-semibold tabular-nums"
                 :class="plClass(point.profit)"
               >
                 {{ signYuan(point.profit) }}
               </p>
-              <p v-else class="mt-1.5 font-mono text-base font-semibold tabular-nums" :class="plClass(point.profit)">
+              <p v-else class="mt-1.5 font-mono text-lg font-semibold tabular-nums" :class="plClass(point.profit)">
                 {{ (point.rate * 100).toFixed(2) }}%
               </p>
-              <p v-if="showProfit && showRate" class="font-mono text-xs text-text-tertiary">
+              <p v-if="showProfit && showRate" class="font-mono text-sm text-text-tertiary">
                 {{ (point.rate * 100).toFixed(2) }}%
               </p>
             </button>

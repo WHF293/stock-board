@@ -406,6 +406,13 @@ const buildStyles = (): DeepPartial<Styles> => {
       tickText: { color: 'transparent' },
       tickLine: { color: CHART_AXIS_LINE_COLOR },
     },
+    // 副图指标柱（VOL / MACD 等）：库内默认 upColor 为绿 / downColor 为红（国际惯例），
+    // 与主图蜡烛的涨跌配色主题相悖，这里统一覆盖为主题涨跌色（红涨绿跌，2026-11-10 王总需求）
+    indicator: {
+      bars: [{ upColor: trend.up, downColor: trend.down, noChangeColor: trend.flat }],
+      circles: [{ upColor: trend.up, downColor: trend.down, noChangeColor: trend.flat }],
+      ohlc: { upColor: trend.up, downColor: trend.down, noChangeColor: trend.flat },
+    },
     separator: { color: CHART_SPLIT_LINE_COLOR },
   };
 };

@@ -12,6 +12,9 @@ export const TZZB_MCP_AUTH_INFO_PATH = '/auth-info';
 /** 鉴权启动子路径（POST <TZZB_MCP_PROXY_PATH>/auth-start；仅本地 dev server 提供，不透传上游） */
 export const TZZB_MCP_AUTH_START_PATH = '/auth-start';
 
+/** 授权清空子路径（POST <TZZB_MCP_PROXY_PATH>/auth-clear；仅本地 dev server 提供，不透传上游） */
+export const TZZB_MCP_AUTH_CLEAR_PATH = '/auth-clear';
+
 /**
  * 正式环境 MCP endpoint（2026-11-09 正式环境发布，写死此处的唯一目标地址；
  * 与前端 src/common/api/tzzb.api.ts 的 TZZB_MCP_ENDPOINT 保持一致，换环境两处同步改）
@@ -27,8 +30,16 @@ const REDIRECT_PORT = 8791;
 /** OAuth 回调地址（loopback；上游 registration 白名单里就是它，勿改） */
 const REDIRECT_URI = `http://127.0.0.1:${REDIRECT_PORT}/callback`;
 
-/** 鉴权流整体超时（毫秒）：浏览器登录 + 确认授权给 5 分钟足够 */
-const AUTH_FLOW_TIMEOUT_MS = 300_000;
+/**
+ * 鉴权流软超时（毫秒）：浏览器登录 + 确认授权给 10 分钟。
+ * 超时只记 authError 提示，**回环监听与授权页地址继续保持**——用户晚完成
+ * 授权时 code 仍能送回完成交换（此前超时即关端口，浏览器回调报
+ * ERR_CONNECTION_REFUSED，2026-11-10 王总实测踩坑）
+ */
+const AUTH_FLOW_TIMEOUT_MS = 600_000;
+
+/** 鉴权流硬超时（毫秒）：软超时后仍无回调才彻底关闭监听释放端口 */
+const AUTH_FLOW_HARD_TIMEOUT_MS = 30 * 60_000;
 
 /** 上游透传的请求头（MCP 会话 / 协议版本 / 鉴权 / SSE 续传） */
 const PASSTHROUGH_HEADERS = [
@@ -44,43 +55,16 @@ const RESPONSE_HEADERS = ['mcp-session-id', 'mcp-protocol-version'] as const;
 /** 上游超时（MCP 工具调用可能较慢，放宽到 60s） */
 const UPSTREAM_TIMEOUT_MS = 60_000;
 
-/** 上游请求 UA（WAF 对非浏览器 UA 敏感，伪装成真实 Chrome） */
+/** 上游请求 UA（WAF 对非浏览器 UA 敏感，伪装成真实 Chrome；MCP 与 OAuth 通道统一用同一指纹） */
 const UPSTREAM_USER_AGENT =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36';
 
 /**
- * WAF 回显熔断基础冷却（毫秒）。实测（2026-11-09）：瞬时并发触发 hexin-waf
- * 影子封禁后，上游对**任何**请求（任意路径/方法/UA/token）回 200 + 请求头回显，
- * 从最后一次请求起静默约 3 分钟才解除 —— 期间任何重试都会续封，所以触发后
- * 必须完全静默冷却，而不是短间隔退避（短退避会永远解不了封）
+ * 上游 MCP 授权 scope（对齐 Claude Code 实测值：公开客户端 + tools.read 的
+ * refresh_token 可正常续期一个月；2026-11-10 判决实验证实 AS refresh 路径只认
+ * 公开客户端，机密客户端 client_secret_post 的 refresh 一律 invalid_client）
  */
-const WAF_COOLDOWN_MS = 180_000;
-/** WAF 冷却上限（连续触发时冷却时长指数递增，封顶 30 分钟） */
-const WAF_COOLDOWN_MAX_MS = 30 * 60_000;
-
-/** WAF 熔断状态（同进程所有请求共享）：回显触发后进入冷却，冷却期内请求快速
- * 失败（不打上游）；冷却结束放行下一个请求作探测 —— 成功则复位，仍回显则冷却
- * 时长翻倍（连续触发说明封禁未过，继续打只会续封） */
-const wafBreaker = { cooldownUntil: 0, strikes: 0 };
-
-/** 合法上游响应体的开头特征（JSON-RPC 单响应 / SSE 帧 / SSE 注释行） */
-const JSONRPC_BODY_PREFIXES = ['{"jsonrpc"', 'event:', 'data:', ':'] as const;
-
-/** 上游响应体 reader 的最小结构（Node fetch body.getReader() 返回，宽于标准类型） */
-interface UpstreamBodyReader {
-  /** 读取下一块 */
-  read: () => Promise<{ done: boolean; value?: Uint8Array }>;
-  /** 提前终止（丢弃 WAF 回显时用） */
-  cancel: () => Promise<void>;
-}
-
-/** 响应体预读首块 */
-interface UpstreamBodyChunk {
-  /** 流是否已读完 */
-  done: boolean;
-  /** 块数据 */
-  value?: Uint8Array;
-}
+const UPSTREAM_SCOPE = 'tools.read';
 
 /**
  * 凭据文件形态（.ai/项目资源/tzzb-mcp/oauth.local.json，由
@@ -91,6 +75,8 @@ interface TzzbAuthFile {
   registration?: {
     client_id?: string;
     client_secret?: string;
+    /** 客户端认证方式（'none' = 公开客户端 PKCE-only；refresh 路径仅认 'none'，2026-11-10 实测） */
+    token_endpoint_auth_method?: string;
     /** 客户端注册时间（秒级时间戳；授权时间缺记录时的回落值） */
     client_id_issued_at?: number;
   };
@@ -136,21 +122,38 @@ const createAuthProvider = (getTarget: ValueGetter, tokenFile: string | undefine
     const store = load();
     const refreshToken = store?.tokens?.refresh_token;
     const clientId = store?.registration?.client_id;
-    const clientSecret = store?.registration?.client_secret;
     const endpoint = tokenEndpoint();
-    if (!tokenFile || !refreshToken || !clientId || !clientSecret || !endpoint) return null;
+    // 公开客户端（'none'）才走 refresh；旧机密客户端注册 AS refresh 路径不认，
+    // 直接快速失败让 401 兜底触发重新授权（会重新注册为公开客户端）
+    if (
+      !tokenFile ||
+      !refreshToken ||
+      !clientId ||
+      !endpoint ||
+      store?.registration?.token_endpoint_auth_method !== 'none'
+    ) {
+      return null;
+    }
     try {
       const res = await fetch(endpoint, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'Mozilla/5.0' },
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'User-Agent': UPSTREAM_USER_AGENT,
+        },
         body: new URLSearchParams({
           grant_type: 'refresh_token',
           refresh_token: refreshToken,
           client_id: clientId,
-          client_secret: clientSecret,
+          scope: UPSTREAM_SCOPE,
         }),
       });
-      if (!res.ok) return null;
+      if (!res.ok) {
+        // 取证：续期失败要区分 invalid_client（token 在服务端无记录）与 invalid_grant（token 过期/轮换）
+        const body = await res.text().catch(() => '');
+        console.warn('[tzzb-mcp] refresh FAILED:', res.status, body.slice(0, 120));
+        return null;
+      }
       const json = (await res.json()) as Record<string, unknown>;
       const accessToken = json['access_token'];
       if (typeof accessToken !== 'string') return null;
@@ -165,6 +168,11 @@ const createAuthProvider = (getTarget: ValueGetter, tokenFile: string | undefine
         expires_at: Date.now() + (expiresIn - 60) * 1000,
       };
       writeFileSync(tokenFile, JSON.stringify(store, null, 2));
+      // 取证：refresh 成功时确认是否轮换了 refresh_token（轮换标记留档）
+      console.warn(
+        '[tzzb-mcp] refresh OK, rotated:',
+        typeof json['refresh_token'] === 'string' && json['refresh_token'] !== refreshToken,
+      );
       return accessToken;
     } catch {
       return null;
@@ -237,6 +245,8 @@ interface TzzbAuthStartResult {
 const createAuthFlowStarter = (getTarget: ValueGetter, tokenFile: string | undefined) => {
   /** 是否有进行中的鉴权流（单飞：重复点击不重复占回调端口） */
   let active = false;
+  /** 进行中鉴权流的授权页地址（重复发起时回给前端复用打开，避免只报错无法继续） */
+  let activeAuthorizeUrl: string | null = null;
   /** 最近一次鉴权流失败原因（成功 / 重新发起时清空；auth-info 透出给前端快速失败） */
   let lastAuthError: string | null = null;
 
@@ -261,7 +271,10 @@ const createAuthFlowStarter = (getTarget: ValueGetter, tokenFile: string | undef
   const postForm = async (url: string, body: Record<string, string>): Promise<Record<string, unknown>> => {
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'Mozilla/5.0' },
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': UPSTREAM_USER_AGENT,
+      },
       body: new URLSearchParams(body),
     });
     const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
@@ -279,15 +292,22 @@ const ensureRegistration = async (
   store: TzzbAuthFile,
   origin: string,
 ): Promise<NonNullable<TzzbAuthFile['registration']>> => {
-  if (store.registration) return store.registration;
+  // 公开客户端注册可直接复用；旧机密客户端（client_secret_post）在 AS 的
+  // refresh_token 路径不被支持（判决实验：真 client + 假 rt 也 invalid_client），
+  // 丢弃重注册为公开客户端（'none'）
+  if (store.registration?.token_endpoint_auth_method === 'none') return store.registration;
+  store.registration = undefined;
   const res = await fetch(`${origin}/oauth2/register`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0' },
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': UPSTREAM_USER_AGENT,
+      },
       body: JSON.stringify({
         client_name: 'whf-stock-board-dev-authcode',
         grant_types: ['authorization_code', 'refresh_token'],
         response_types: ['code'],
-        token_endpoint_auth_method: 'client_secret_post',
+        token_endpoint_auth_method: 'none',
         redirect_uris: [REDIRECT_URI],
       }),
     });
@@ -301,11 +321,20 @@ const ensureRegistration = async (
   /**
    * 起回调监听并等待授权回调
    * @param server 回环 HTTP server（调用方负责 close）
+   * @param onTimeout 软超时回调（记 authError 提示；监听保持，晚到的 code 仍可完成交换）
    * @returns 授权回调 URL（含 code / state 或 error）
    */
-  const waitCallback = (server: Server): Promise<URL> =>
+  const waitCallback = (server: Server, onTimeout: () => void): Promise<URL> =>
     new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('等待授权超时')), AUTH_FLOW_TIMEOUT_MS);
+      // 软超时：不关闭监听，授权页地址仍有效（用户晚完成授权照样送回 code）
+      const softTimer = setTimeout(onTimeout, AUTH_FLOW_TIMEOUT_MS);
+      // 硬超时：软超时后仍无回调，放弃整条流（reject → 调用方关端口）
+      const hardTimer = setTimeout(() => reject(new Error('等待授权超时')), AUTH_FLOW_HARD_TIMEOUT_MS);
+      /** 清理两个定时器（收到回调 / 硬超时 / 监听异常） */
+      const clearTimers = (): void => {
+        clearTimeout(softTimer);
+        clearTimeout(hardTimer);
+      };
       server.on('request', (req, res) => {
         const u = new URL(req.url ?? '/', REDIRECT_URI);
         if (u.pathname !== '/callback') {
@@ -314,11 +343,11 @@ const ensureRegistration = async (
         }
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end('<h2>授权成功</h2>可关闭此窗口，回到股票看板。');
-        clearTimeout(timer);
+        clearTimers();
         resolve(u);
       });
       server.on('error', (err) => {
-        clearTimeout(timer);
+        clearTimers();
         reject(err);
       });
       server.listen(REDIRECT_PORT, '127.0.0.1');
@@ -351,10 +380,15 @@ const ensureRegistration = async (
       authorizeUrl.searchParams.set('redirect_uri', REDIRECT_URI);
       authorizeUrl.searchParams.set('code_challenge', challenge);
       authorizeUrl.searchParams.set('code_challenge_method', 'S256');
+      authorizeUrl.searchParams.set('scope', UPSTREAM_SCOPE);
       authorizeUrl.searchParams.set('state', state);
+      activeAuthorizeUrl = authorizeUrl.toString();
 
       // 返回授权页地址后，回调等待与 code 交换转后台（前端轮询 auth-info 感知结果）
-      void waitCallback(server)
+      void waitCallback(server, () => {
+        // 软超时：只记提示，监听与授权页地址保持——晚完成的授权依然生效
+        lastAuthError = '等待授权超时（监听保持中，完成浏览器授权后仍会自动生效）';
+      })
         .then(async (callbackUrl) => {
           server.close();
           const error = callbackUrl.searchParams.get('error');
@@ -364,12 +398,13 @@ const ensureRegistration = async (
           if (callbackUrl.searchParams.get('state') !== state) {
             throw new Error('state 不匹配，疑似 CSRF，中止');
           }
+          // 公开客户端（token_endpoint_auth_method: 'none'）：交换只带 client_id，
+          // 禁止携带 secret（PKCE code_verifier 承担客户端认证）
           const json = await postForm(`${origin}/oauth2/token`, {
             grant_type: 'authorization_code',
             code: callbackUrl.searchParams.get('code') ?? '',
             redirect_uri: REDIRECT_URI,
             client_id: String(reg.client_id),
-            client_secret: String(reg.client_secret ?? ''),
             code_verifier: verifier,
           });
           if (typeof json['access_token'] !== 'string') throw new Error('token endpoint 未返回 access_token');
@@ -385,6 +420,22 @@ const ensureRegistration = async (
           // 仅完整浏览器授权时更新 authorized_at（顶栏授权时间展示口径，同 helper）
           store.authorized_at = Date.now();
           writeFileSync(tokenFile as string, JSON.stringify(store, null, 2));
+          // 授权成功：清掉软超时等历史提示（晚完成的授权也要清）
+          lastAuthError = null;
+          // 诊断记录（不触网、不消耗凭据）：只登记交换响应的原始字段留档排查。
+          // ⚠️ 禁止在此处用 refresh_token 做探测请求——上游 rt 是一次性轮换的，
+          // 探测成功会消费掉当前 rt 并轮换出新值，不落盘就会导致正式续期 401
+          // （2026-11-10 13:13 曾因探测消费 rt 引发 401 自动重授权循环）
+          const debug: Record<string, unknown> = {
+            exchanged_at: new Date().toISOString(),
+            exchange_response_keys: Object.keys(json),
+            exchange_has_refresh_token: typeof json['refresh_token'] === 'string',
+            exchange_refresh_token_len:
+              typeof json['refresh_token'] === 'string' ? (json['refresh_token'] as string).length : 0,
+            exchange_expires_in: json['expires_in'] ?? null,
+            exchange_scope: json['scope'] ?? null,
+          };
+          writeFileSync(`${tokenFile}.debug.json`, JSON.stringify(debug, null, 2));
         })
         .catch((err: unknown) => {
           lastAuthError = err instanceof Error ? err.message : String(err);
@@ -392,11 +443,13 @@ const ensureRegistration = async (
         })
         .finally(() => {
           active = false;
+          activeAuthorizeUrl = null;
         });
       return { authorizeUrl: authorizeUrl.toString() };
     } catch (err) {
       server.close();
       active = false;
+      activeAuthorizeUrl = null;
       if (err instanceof Error && err.message === '等待授权超时') {
         lastAuthError = err.message;
       }
@@ -404,8 +457,20 @@ const ensureRegistration = async (
     }
   };
 
-  return { start, getLastError: (): string | null => lastAuthError };
+  return {
+    start,
+    getLastError: (): string | null => lastAuthError,
+    getActiveAuthorizeUrl: (): string | null => activeAuthorizeUrl,
+  };
 };
+
+/**
+ * 上游响应体 reader 的最小结构（Node fetch body.getReader() 返回，宽于标准类型）
+ */
+interface UpstreamBodyReader {
+  /** 读取下一块 */
+  read: () => Promise<{ done: boolean; value?: Uint8Array }>;
+}
 
 /**
  * 读取并拼接请求体（POST JSON / SSE 续传都需要原样透传）
@@ -430,8 +495,9 @@ const readRequestBody = (req: Connect.IncomingMessage): Promise<Buffer> =>
  * - 鉴权：优先凭据文件（TZZB_MCP_TOKEN_FILE，oauth.local.json，由
  *   tzzb-auth-helper.mjs 维护，401 自动 refresh_token 续期重试），其次静态 token；
  * - 方法固定透传 POST（MCP Streamable HTTP 仅用 POST + 可选 GET 流）；
- *   例外：GET <同源路径>/auth-info、POST <同源路径>/auth-start
- *   为本地端点（授权时间 / 发起浏览器鉴权，不透传上游）；
+ *   例外：GET <同源路径>/auth-info、POST <同源路径>/auth-start、
+ *   POST <同源路径>/auth-clear 为本地端点（授权时间 / 发起浏览器鉴权 /
+ *   清空本地凭据，不透传上游）；
  * - MCP 会话头双向透传（client → upstream 的 Mcp-Session-Id，upstream → client 的
  *   下发头）；响应体流式回写，SSE 渐进输出不被缓冲卡死
  * @param getTarget 生效 target 惰性解析器（恒返回正式环境 endpoint）
@@ -472,7 +538,36 @@ const createTzzbMcpMiddleware =
         const known = message === 'AUTH_FLOW_IN_PROGRESS' || message === 'TZZB_MCP_NOT_CONFIGURED';
         res.statusCode = known ? 409 : 502;
         res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ error: message }));
+        // 流程进行中时回传进行中流程的授权页地址：前端复用打开（完成授权即走原流程回调），不白报错
+        res.end(
+          JSON.stringify({
+            error: message,
+            authorizeUrl:
+              message === 'AUTH_FLOW_IN_PROGRESS' ? authFlow.getActiveAuthorizeUrl() ?? undefined : undefined,
+          }),
+        );
+      }
+      return;
+    }
+    // 本地授权清空端点：POST /tzzb-mcp/auth-clear 删除本地凭据文件中的
+    // registration / tokens / authorized_at（下次授权将重新动态注册客户端；
+    // 用于注册失效 refresh 报 invalid_client 等场景，不透传上游）
+    if (req.method === 'POST' && urlPath === TZZB_MCP_AUTH_CLEAR_PATH) {
+      if (!tokenFile) {
+        res.statusCode = 503;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ error: 'TZZB_MCP_NOT_CONFIGURED' }));
+        return;
+      }
+      try {
+        writeFileSync(tokenFile, JSON.stringify({}, null, 2));
+        res.statusCode = 200;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ cleared: true }));
+      } catch (err) {
+        res.statusCode = 500;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ error: 'TZZB_MCP_AUTH_CLEAR_FAILED', message: String(err) }));
       }
       return;
     }
@@ -484,22 +579,6 @@ const createTzzbMcpMiddleware =
       res.end(JSON.stringify({ error: 'TZZB_MCP_NOT_CONFIGURED' }));
       return;
     }
-    // WAF 熔断冷却期：快速失败不打上游（任何重试都会续封，必须静默冷却）
-    const nowMs = Date.now();
-    if (nowMs < wafBreaker.cooldownUntil) {
-      const retryAfterMs = wafBreaker.cooldownUntil - nowMs;
-      res.statusCode = 503;
-      res.setHeader('Retry-After', String(Math.ceil(retryAfterMs / 1000)));
-      res.setHeader('Content-Type', 'application/json');
-      res.end(
-        JSON.stringify({
-          error: 'TZZB_MCP_WAF_COOLDOWN',
-          retryAfterMs,
-          message: `上游防护冷却中，约 ${Math.max(1, Math.ceil(retryAfterMs / 60_000))} 分钟后自动恢复（冷却期内请求快速失败，避免续封）`,
-        }),
-      );
-      return;
-    }
     try {
       const body = await readRequestBody(req);
       const buildHeaders = async (): Promise<Record<string, string>> => {
@@ -508,6 +587,7 @@ const createTzzbMcpMiddleware =
           Accept: 'application/json, text/event-stream',
           // 上游 WAF（hexin-waf）对非浏览器 UA 敏感，固定伪装成真实浏览器特征
           'User-Agent': UPSTREAM_USER_AGENT,
+          'Accept-Language': 'zh-CN,zh;q=0.9',
         };
         const bearer = (await auth.getAccessToken()) ?? getToken();
         if (bearer) headers.Authorization = `Bearer ${bearer}`;
@@ -527,38 +607,12 @@ const createTzzbMcpMiddleware =
       /**
        * 正常响应透传：写入状态 / 响应头后流式回写（SSE 事件到达即推给浏览器）
        * @param upstream 上游响应
-       * @param reader 响应体 reader
-       * @param first 已预读的首块（透传前判别 WAF 回显时读出，不能丢；未预读时 undefined）
+       * @param reader 响应体 reader（上游无 body 时为 undefined，仅透传状态与头）
        */
       const streamUpstream = async (
         upstream: Response,
-        reader: UpstreamBodyReader,
-        first?: UpstreamBodyChunk,
+        reader?: UpstreamBodyReader,
       ): Promise<void> => {
-        res.statusCode = upstream.status;
-        const contentType = upstream.headers.get('content-type');
-        if (contentType) res.setHeader('Content-Type', contentType);
-        for (const name of RESPONSE_HEADERS) {
-          const value = upstream.headers.get(name);
-          if (value) res.setHeader(name, value);
-        }
-        if (first?.value) res.write(first.value);
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          res.write(value);
-        }
-        res.end();
-      };
-      let upstream = await doFetch();
-      // token 失效：凭据文件存在时刷新续期后重试一次
-      if (upstream.status === 401 && tokenFile) {
-        await auth.refresh();
-        upstream = await doFetch();
-      }
-      const reader = upstream.body?.getReader();
-      // 非 200：原样透传状态与响应体（401/400 等错误体对客户端排障有用，不重试）
-      if (upstream.status !== 200 || !reader) {
         res.statusCode = upstream.status;
         const contentType = upstream.headers.get('content-type');
         if (contentType) res.setHeader('Content-Type', contentType);
@@ -574,38 +628,21 @@ const createTzzbMcpMiddleware =
           }
         }
         res.end();
+      };
+      let upstream = await doFetch();
+      // token 失效：凭据文件存在时刷新续期后重试一次
+      if (upstream.status === 401 && tokenFile) {
+        await auth.refresh();
+        upstream = await doFetch();
+      }
+      const reader = upstream.body?.getReader();
+      // 非 200：原样透传状态与响应体（401/400 等错误体对客户端排障有用，不重试）
+      if (upstream.status !== 200 || !reader) {
+        await streamUpstream(upstream, reader);
         return;
       }
-      // 预读首块判别 WAF 回显（200 + 请求头回显 JSON，合法 JSON-RPC 必以
-      // {"jsonrpc" / event: / data: / : ping 开头）
-      const first = await reader.read();
-      const head =
-        first.value && first.value.length > 0
-          ? Buffer.from(first.value.slice(0, 32)).toString('utf-8')
-          : '';
-      const wafEcho = !first.done && head !== '' && !JSONRPC_BODY_PREFIXES.some((p) => head.startsWith(p));
-      if (!wafEcho) {
-        // 正常响应：熔断复位
-        wafBreaker.strikes = 0;
-        wafBreaker.cooldownUntil = 0;
-        await streamUpstream(upstream, reader, first);
-        return;
-      }
-      // WAF 影子封禁：触发熔断 —— 从现在起完全静默冷却（时长指数递增），
-      // 冷却期内所有请求快速失败；严禁短间隔重试（任何请求都会续封）
-      wafBreaker.strikes += 1;
-      const cooldownMs = Math.min(WAF_COOLDOWN_MS * 2 ** (wafBreaker.strikes - 1), WAF_COOLDOWN_MAX_MS);
-      wafBreaker.cooldownUntil = Date.now() + cooldownMs;
-      await reader.cancel().catch(() => undefined);
-      res.statusCode = 502;
-      res.setHeader('Content-Type', 'application/json');
-      res.end(
-        JSON.stringify({
-          error: 'TZZB_MCP_WAF_ECHO',
-          cooldownMs,
-          message: `上游防护（WAF）触发影子封禁，代理将静默 ${Math.round(cooldownMs / 60_000)} 分钟后自动探测恢复；期间请勿频繁手动同步`,
-        }),
-      );
+      // 200 一律原样流式透传（不做任何加工 / 拦截 / 重试；上游回什么客户端就收什么）
+      await streamUpstream(upstream, reader);
     } catch (error) {
       res.statusCode = 502;
       res.end(JSON.stringify({ error: 'TZZB_MCP_UPSTREAM_FAILED', message: String(error) }));

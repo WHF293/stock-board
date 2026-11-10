@@ -20,6 +20,11 @@ export interface WatchlistGroup {
   name: string;
   /** 分组内的自选股，数组顺序即展示顺序 */
   stocks: WatchlistStock[];
+  /**
+   * 分组内排序模式（custom = 自定义拖拽顺序，asc / desc = 按涨跌幅）。
+   * 每个分组独立持久化；缺省（旧数据未存过）按 WATCHLIST_DEFAULT_SORT_MODE 兜底
+   */
+  sortMode?: WatchlistSortMode;
 }
 
 /**

@@ -237,6 +237,35 @@ export const exportDataPort = async (path: string, selectedIds: readonly string[
 };
 
 /**
+ * 校验并解析导入 JSON 文本（选文件与粘贴导入共用的唯一校验出口）
+ * @param text 导出文件 / JSON 片段的原文
+ * @returns 解析后的导出文件对象
+ * @throws Error 不是合法 JSON / 结构不符合导出格式 / 格式版本高于当前版本
+ */
+export const parseImportJson = (text: string): DataPortFile => {
+  let file: DataPortFile;
+  try {
+    file = JSON.parse(text) as DataPortFile;
+  } catch {
+    throw new Error('内容不是合法的 JSON，无法解析');
+  }
+  if (
+    typeof file.formatVersion !== 'number' ||
+    typeof file.data !== 'object' ||
+    file.data === null ||
+    !Array.isArray(file.categories)
+  ) {
+    throw new Error('内容结构不符合导出格式，无法导入');
+  }
+  if (file.formatVersion > DATA_PORT_FORMAT_VERSION) {
+    throw new Error(
+      `导出文件格式版本（v${file.formatVersion}）高于当前版本（v${DATA_PORT_FORMAT_VERSION}），请先升级应用`,
+    );
+  }
+  return file;
+};
+
+/**
  * 弹出系统「打开文件」对话框并解析导出文件
  * @returns 解析后的导出文件；用户取消返回 null
  * @throws Error 文件不可读 / 不是合法 JSON / 格式版本高于当前版本
@@ -249,26 +278,7 @@ export const pickAndParseImportFile = async (): Promise<DataPortFile | null> => 
   });
   if (typeof selected !== 'string') return null;
   const text = await readTextFile(selected);
-  let file: DataPortFile;
-  try {
-    file = JSON.parse(text) as DataPortFile;
-  } catch {
-    throw new Error('文件不是合法的 JSON，无法解析');
-  }
-  if (
-    typeof file.formatVersion !== 'number' ||
-    typeof file.data !== 'object' ||
-    file.data === null ||
-    !Array.isArray(file.categories)
-  ) {
-    throw new Error('文件结构不符合导出格式，无法导入');
-  }
-  if (file.formatVersion > DATA_PORT_FORMAT_VERSION) {
-    throw new Error(
-      `导出文件格式版本（v${file.formatVersion}）高于当前版本（v${DATA_PORT_FORMAT_VERSION}），请先升级应用`,
-    );
-  }
-  return file;
+  return parseImportJson(text);
 };
 
 /**

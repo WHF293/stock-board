@@ -2,7 +2,7 @@
 import { computed } from 'vue';
 
 /**
- * 投资账本指标行：总资产 / 区间盈亏 / 当前仓位 / 可用资金 / 对比沪深300
+ * 投资账本指标行：总资产 / 当日盈亏 / 区间盈亏 / 当前仓位 / 可用资金 / 对比沪深300
  *
  * 涨跌语义色跟随 data-trend 主题（红涨绿跌默认）；可用资金为负时红色警示
  */
@@ -15,6 +15,12 @@ const props = defineProps<{
   availableFunds: number;
   /** 当前仓位 0~1 */
   positionRatio: number;
+  /** 当日盈亏（最新净值点 dailyProfit；无曲线数据为 0） */
+  dailyProfit: number;
+  /** 当日收益率（小数；null = 无曲线数据） */
+  dailyRate: number | null;
+  /** 当日盈亏归属交易日（YYYYMMDD；空 = 无曲线数据） */
+  dailyDate: string;
   /** 区间盈亏 */
   rangeProfit: number;
   /** 区间收益率（小数） */
@@ -45,6 +51,18 @@ const plClass = computed(() =>
   props.rangeProfit > 0 ? 'text-up' : props.rangeProfit < 0 ? 'text-down' : 'text-flat',
 );
 
+/** 当日盈亏文案色 */
+const dailyClass = computed(() =>
+  props.dailyProfit > 0 ? 'text-up' : props.dailyProfit < 0 ? 'text-down' : 'text-flat',
+);
+
+/** 当日盈亏归属日文案（YYYYMMDD → M月D日） */
+const dailyDateLabel = computed(() => {
+  const d = props.dailyDate;
+  if (!/^\d{8}$/.test(d)) return '';
+  return `${Number(d.slice(4, 6))}月${Number(d.slice(6, 8))}日`;
+});
+
 /** 超额收益（自身收益率 − 沪深300） */
 const excess = computed(() => props.rangeRate - props.hs300Rate);
 
@@ -55,11 +73,21 @@ const excessClass = computed(() =>
 </script>
 
 <template>
-  <div class="grid shrink-0 grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
+  <div class="grid shrink-0 grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
     <div class="rounded-card bg-surface p-4 shadow-card">
       <p class="mb-1 text-xs text-text-tertiary">总资产</p>
       <p class="font-mono text-xl font-semibold tabular-nums text-text">{{ yuan(totalAsset) }}</p>
       <p class="mt-0.5 text-xs text-text-tertiary">持仓市值 {{ yuan(marketValue) }}</p>
+    </div>
+
+    <div class="rounded-card bg-surface p-4 shadow-card">
+      <p class="mb-1 text-xs text-text-tertiary">当日盈亏{{ dailyDateLabel ? `（${dailyDateLabel}）` : '' }}</p>
+      <p class="font-mono text-xl font-semibold tabular-nums" :class="dailyClass">
+        {{ dailyProfit > 0 ? '+' : '' }}{{ yuan(dailyProfit) }}
+      </p>
+      <p class="mt-0.5 text-xs text-text-tertiary">
+        当日收益率 <b :class="dailyClass">{{ dailyRate === null ? '—' : pct(dailyRate) }}</b>
+      </p>
     </div>
 
     <div class="rounded-card bg-surface p-4 shadow-card">

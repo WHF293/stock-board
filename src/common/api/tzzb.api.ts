@@ -54,12 +54,9 @@ let sessionPromise: Promise<string | undefined> | null = null;
 
 /**
  * 解析响应体：兼容 JSON 与 SSE（data: 行）两种形态
- *
- * 上游 WAF 被瞬时并发触发时会返回 200 + 请求头回显 JSON（无 jsonrpc 字段），
- * 代理层已做退避重试；此处再兜底校验一次，非 JSON-RPC 一律抛错，
- * 避免把回显垃圾静默写进页面状态（表现为日历空 / 切区间不刷新）
  * @param text 响应原文
  * @returns 解析出的 JSON-RPC 对象（SSE 取最后一个 data 帧）
+ * @throws 响应不是合法 JSON-RPC 时抛错，错误信息直接携带响应体原文（截断展示，不加工）
  */
 const parseRpcBody = (text: string): Record<string, unknown> => {
   const json = (() => {
@@ -72,7 +69,7 @@ const parseRpcBody = (text: string): Record<string, unknown> => {
     return JSON.parse(frames[frames.length - 1] ?? '{}') as unknown;
   })() as Record<string, unknown>;
   if (!json || typeof json !== 'object' || !('jsonrpc' in json)) {
-    throw new Error('MCP 上游返回异常响应（疑似 WAF 拦截），请稍后重新同步');
+    throw new Error(`MCP 响应非 JSON-RPC，原文：${text.slice(0, 300) || '（空响应体）'}`);
   }
   return json;
 };
@@ -207,15 +204,21 @@ interface TzzbKeys {
   custId: string;
 }
 
-/** 当前账户范围（null = 全部账户；切换账户时由看板设置，影响全部数据接口取数口径） */
-let scopeAccountId: string | null = null;
+/** 账户原始分组缓存 key（localStorage；账户固定不动，拉一次持久复用，菜单「更新账户列表」强制刷新） */
+const ACCOUNT_CACHE_KEY = 'tzzb.accounts.raw.v1';
+
+/** 同步账户勾选 key（localStorage；null = 从未确认过 → 首次拉到账户后弹勾选确认） */
+const ACCOUNT_SELECTED_KEY = 'tzzb.accounts.selected.v1';
+
+/** 当前账户范围（null = 全部账户；多选勾选的账户 id 集合，影响全部数据接口取数口径） */
+let scopeAccountIds: string[] | null = null;
 
 /**
- * 设置账户范围（看板切换账户时调用；null = 全部账户）
- * @param accountId 账户 id（promptAccountSelection 分组内条目 id）；null = 全部
+ * 设置账户范围（看板确认同步账户时调用；null = 全部账户）
+ * @param accountIds 账户 id 集合（promptAccountSelection 分组内条目 id）；null = 全部
  */
-export const setTzzbAccountScope = (accountId: string | null): void => {
-  scopeAccountId = accountId;
+export const setTzzbAccountScope = (accountIds: string[] | null): void => {
+  scopeAccountIds = accountIds;
 };
 
 /** promptAccountSelection 分组响应形态 */
@@ -228,14 +231,49 @@ let accountRawCache: TzzbAccountRaw | null = null;
 let accountPromise: Promise<TzzbAccountRaw | null> | null = null;
 
 /**
- * 确保账户原始分组可用（首次调 promptAccountSelection）
+ * 读取 localStorage 账户缓存（结构损坏 / 字段缺失一律丢弃）
+ * @returns 缓存的分组响应；无有效缓存返回 null
+ */
+const readAccountCache = (): TzzbAccountRaw | null => {
+  try {
+    const raw = localStorage.getItem(ACCOUNT_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { raw?: TzzbAccountRaw };
+    return parsed?.raw && typeof parsed.raw === 'object' ? parsed.raw : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * 账户分组落盘缓存（内存 + localStorage 一起写）
+ * @param raw 分组响应
+ */
+const writeAccountCache = (raw: TzzbAccountRaw): void => {
+  accountRawCache = raw;
+  try {
+    localStorage.setItem(ACCOUNT_CACHE_KEY, JSON.stringify({ cachedAt: Date.now(), raw }));
+  } catch {
+    // 存储满 / 隐私模式：内存缓存仍有效，静默降级
+  }
+};
+
+/**
+ * 确保账户原始分组可用（内存缓存 → localStorage 缓存 → 网络 promptAccountSelection）
  * @returns 分组响应；未配置代理时返回 null
  */
 const ensureAccountRaw = async (): Promise<TzzbAccountRaw | null> => {
   if (accountRawCache) return accountRawCache;
+  const cached = readAccountCache();
+  if (cached) {
+    accountRawCache = cached;
+    return accountRawCache;
+  }
   if (!accountPromise) {
     accountPromise = callTzzbTool('promptAccountSelection', { scope: 'all' }).then((r) => {
-      accountRawCache = (r as TzzbAccountRaw | undefined) ?? null;
+      const raw = (r as TzzbAccountRaw | undefined) ?? null;
+      if (raw) writeAccountCache(raw);
+      accountRawCache = raw;
       return accountRawCache;
     });
   }
@@ -247,14 +285,56 @@ const ensureAccountRaw = async (): Promise<TzzbAccountRaw | null> => {
 };
 
 /**
- * 从账户分组派生键集合（逗号分隔多账号；设置了账户范围时仅取该账户条目）
+ * 强制刷新账户分组（「更新账户列表」入口）：忽略全部缓存重新调上游，
+ * 成功后覆盖内存与 localStorage 缓存
+ * @returns 最新分组响应；拉取失败抛错（调用方提示）
+ */
+export const refreshTzzbAccountRaw = async (): Promise<TzzbAccountRaw> => {
+  const r = await callTzzbTool('promptAccountSelection', { scope: 'all' });
+  const raw = r as TzzbAccountRaw | undefined;
+  if (!raw) throw new Error('账户列表刷新失败：上游未返回数据');
+  writeAccountCache(raw);
+  return raw;
+};
+
+/**
+ * 读取用户确认的同步账户勾选
+ * @returns 勾选账户 id 集合；null = 从未确认过（首次拉到账户后需弹勾选确认）
+ */
+export const getTzzbSelectedAccountIds = (): string[] | null => {
+  try {
+    const raw = localStorage.getItem(ACCOUNT_SELECTED_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) && parsed.every((v) => typeof v === 'string')
+      ? (parsed as string[])
+      : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * 持久化用户确认的同步账户勾选
+ * @param ids 勾选账户 id 集合（至少 1 个，调用方保证）
+ */
+export const setTzzbSelectedAccountIds = (ids: string[]): void => {
+  try {
+    localStorage.setItem(ACCOUNT_SELECTED_KEY, JSON.stringify(ids));
+  } catch {
+    // 同上：降级内存语义（本次会话仍生效）
+  }
+};
+
+/**
+ * 从账户分组派生键集合（逗号分隔多账号；设置了账户范围时仅取勾选账户条目）
  * @param r 分组响应
  * @returns 股票三键 + 基金两键
  */
 const deriveKeys = (r: Record<string, { id: string; name: string }[]>): TzzbKeys => {
   const ids = (key: string): string => {
     const list = r[key] ?? [];
-    const scoped = scopeAccountId ? list.filter((a) => String(a.id) === scopeAccountId) : list;
+    const scoped = scopeAccountIds ? list.filter((a) => scopeAccountIds!.includes(String(a.id))) : list;
     return scoped.map((a) => String(a.id)).join(',');
   };
   return {
@@ -385,13 +465,11 @@ const rangeDates = (range: string): [string, string] => {
 };
 
 /**
- * 账户列表（promptAccountSelection 分组映射；正式接入后由 tzzb_accounts
- * status=selected 过滤））
- * @returns 账户列表（股票类在前、基金类在后）
+ * 分组响应 → 展示账户列表（股票类在前、基金类在后）
+ * @param r 分组响应
+ * @returns 账户列表
  */
-export const getTzzbAccounts = async (): Promise<TzzbAccount[]> => {
-  const r = await ensureAccountRaw();
-  if (!r) return [];
+const mapAccounts = (r: TzzbAccountRaw): TzzbAccount[] => {
   const group = (key: string, kind: TzzbAccountKind): TzzbAccount[] =>
     (r[key] ?? []).map((a) => ({
       id: String(a.id),
@@ -405,6 +483,24 @@ export const getTzzbAccounts = async (): Promise<TzzbAccount[]> => {
     ...group('fund_id', 'fund'),
   ];
 };
+
+/**
+ * 账户列表（缓存优先：内存 → localStorage → 网络；账户固定不变，
+ * 同步时不再重复拉取，刷新走 refreshTzzbAccounts）
+ * @returns 账户列表（股票类在前、基金类在后）
+ */
+export const getTzzbAccounts = async (): Promise<TzzbAccount[]> => {
+  const r = await ensureAccountRaw();
+  return r ? mapAccounts(r) : [];
+};
+
+/**
+ * 强制刷新账户列表（「更新账户列表」菜单入口）：绕过缓存重调上游并落盘
+ * @returns 最新账户列表
+ * @throws 上游拉取失败
+ */
+export const refreshTzzbAccounts = async (): Promise<TzzbAccount[]> =>
+  mapAccounts(await refreshTzzbAccountRaw());
 
 /**
  * 资产曲线汇总（queryPnlSummary：净值 / 指数 / 区间总盈亏）
@@ -421,15 +517,19 @@ export const getTzzbPnlSummary = async (range = 'm1'): Promise<TzzbPnlSummary | 
     ...fullKeyArgs(keys),
   })) as Record<string, unknown> | undefined;
   if (!r) return null;
-  const assetTrend = ((r['netValueTrend'] as Record<string, unknown>[] | undefined) ?? []).map(
-    (p) => ({
+  const assetTrend = ((r['netValueTrend'] as Record<string, unknown>[] | undefined) ?? [])
+    // 上游起点会自动向前多带约一个月（官方为算区间收益率），按请求起点裁齐，
+    // 否则累计收益曲线会混入区间外的历史盈亏
+    .filter((p) => String(p['time'] ?? '') >= startDate)
+    .map((p) => ({
       date: String(p['time'] ?? ''),
       totalAsset: num(p['totalAsset']),
       dailyProfit: num(p['dailyProfitLoss']),
       navIndex: num(p['netValueIndex']),
       positionRatio: num(p['positionRatio']),
-    }),
-  );
+      dailyRate: num(p['dailyReturnRate']),
+      cumRate: num(p['totalReturnRate']),
+    }));
   const indexTrend = ((r['shIndexTrend'] as Record<string, unknown>[] | undefined) ?? []).map(
     (p) => ({
       date: String(p['time'] ?? ''),
@@ -713,11 +813,28 @@ interface TzzbAuthStart {
   error?: string;
 }
 
+/** 发起鉴权结果：authorizeUrl 恒有值（进行中时为进行中流程的授权页地址，复用打开即可续走原流程） */
+export interface TzzbMcpAuthStartResult {
+  /** 授权页地址（调用方负责拉起系统浏览器） */
+  authorizeUrl: string;
+  /** 是否为已进行中的流程（true = 上次发起的流程尚未完成，本次为复用） */
+  pending: boolean;
+}
+
+/** 授权清空响应形态（POST /tzzb-mcp/auth-clear，dev server 本地端点） */
+interface TzzbAuthClear {
+  /** 清空成功标记 */
+  cleared?: boolean;
+  /** 非 2xx 时的错误码（TZZB_MCP_NOT_CONFIGURED / TZZB_MCP_AUTH_CLEAR_FAILED） */
+  error?: string;
+}
+
 /** MCP 鉴权轮询间隔（毫秒） */
 const AUTH_POLL_INTERVAL_MS = 2_000;
 
-/** MCP 鉴权整体超时（毫秒）：浏览器登录 + 确认授权给 5 分钟足够 */
-const AUTH_WAIT_TIMEOUT_MS = 300_000;
+/** MCP 鉴权整体超时（毫秒）：与代理软超时（10 分钟，见 server/tzzb-mcp-proxy.ts）对齐；
+ * 超时后代理监听仍保持，用户晚完成授权依然落盘生效，只是前端不再等待 */
+const AUTH_WAIT_TIMEOUT_MS = 600_000;
 
 /** 直连通道展示前缀（顶栏同步状态第二行） */
 const DIRECT_LABEL = 'MCP 直连';
@@ -741,16 +858,35 @@ export const fetchAuthorizedAt = async (): Promise<number | null> => {
 
 /**
  * 发起 MCP 浏览器鉴权（dev/preview server 本地端点；server 起回环回调监听，
- * 浏览器完成授权后自动做 code 交换并把凭据落盘 oauth.local.json）
- * @returns 授权页地址（调用方负责拉起系统浏览器）
- * @throws 鉴权流进行中 / 未配置 / 注册失败等（错误码或上游错误摘要）
+ * 浏览器完成授权后自动做 code 交换并把凭据落盘 oauth.local.json）。
+ * 已有流程进行中（AUTH_FLOW_IN_PROGRESS）时不抛错：返回进行中流程的授权页地址
+ * 并置 pending = true，调用方重新打开该地址完成授权即可续走原流程的回调与 code 交换
+ * @returns 授权页地址 + 是否为进行中流程（pending）
+ * @throws 鉴权流未配置（TZZB_MCP_NOT_CONFIGURED）/ 注册失败等（错误码或上游错误摘要）
  */
-export const startTzzbMcpAuth = async (): Promise<string> => {
+export const startTzzbMcpAuth = async (): Promise<TzzbMcpAuthStartResult> => {
   const res = await fetch(`${MCP_PROXY_PATH}/auth-start`, { method: 'POST' });
   const json = (await res.json().catch(() => ({}))) as TzzbAuthStart;
-  if (!res.ok || json.error) throw new Error(json.error ?? `auth-start HTTP ${res.status}`);
+  if (!res.ok) {
+    if (json.error === 'AUTH_FLOW_IN_PROGRESS' && json.authorizeUrl) {
+      return { authorizeUrl: json.authorizeUrl, pending: true };
+    }
+    throw new Error(json.error ?? `auth-start HTTP ${res.status}`);
+  }
   if (!json.authorizeUrl) throw new Error('auth-start 未返回授权地址');
-  return json.authorizeUrl;
+  return { authorizeUrl: json.authorizeUrl, pending: false };
+};
+
+/**
+ * 清空本地 MCP 授权信息（POST /tzzb-mcp/auth-clear）：删除凭据文件中的
+ * 动态注册（registration）、OAuth 令牌（tokens）与授权时间（authorized_at），
+ * 下次授权将重新走动态注册；用于注册失效（refresh 报 invalid_client）等场景
+ * @throws 清空失败（未配置凭据文件 / 落盘失败）
+ */
+export const clearTzzbMcpAuth = async (): Promise<void> => {
+  const res = await fetch(`${MCP_PROXY_PATH}/auth-clear`, { method: 'POST' });
+  const json = (await res.json().catch(() => ({}))) as TzzbAuthClear;
+  if (!res.ok || json.error) throw new Error(json.error ?? `auth-clear HTTP ${res.status}`);
 };
 
 /**

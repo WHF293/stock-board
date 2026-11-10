@@ -17,7 +17,8 @@ import type { TzzbClearedPosition, TzzbStockTrade } from '../types/tzzb.types.ts
 /**
  * 操作复盘分析 store（方案 §2.2 交互决策 1/2）
  *
- * - **点击触发，不自动算**：生成需按票批量拉 qfq 日 K（频率红线约束），
+ * - **自动触发**：流水就绪后由 Dashboard watcher 自动调用（王总 2026-11-10 改定，
+ *   原「点击触发」废弃）；生成需按票批量拉 qfq 日 K（频率红线约束），
  *   并发 ≤3 + 请求前 ≥500ms 错峰（沿用 board-flow-history 既定模式）；
  * - **结果缓存**：cacheKey = accountId|range|dataDate|流水条数，同 key 命中直接复用，
  *   不重拉不重算；派生数据不落 SQLite（可随时重算）；

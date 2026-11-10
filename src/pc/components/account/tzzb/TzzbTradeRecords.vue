@@ -36,12 +36,12 @@ const emit = defineEmits<{
   page: [page: number];
 }>();
 
-/** 视图模式：detail 平铺明细 / summary 按品种汇总 */
+/** 视图模式：detail 平铺明细 / summary 按品种汇总（2026-11-10 起默认汇总） */
 const VIEW_OPTIONS = [
   { label: '明细', value: 'detail' },
   { label: '按品种汇总', value: 'summary' },
 ];
-const view = ref<string>('detail');
+const view = ref<string>('summary');
 
 /** 汇总视图展开的品种（code 集合；点击分组行展开 / 收起明细） */
 const expanded = ref<Set<string>>(new Set());

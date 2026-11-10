@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import type { EChartsCoreOption } from 'echarts/core';
 import BaseChart from '../../charts/BaseChart.vue';
 import BaseEmpty from '../../ui/BaseEmpty.vue';
@@ -41,6 +41,9 @@ const props = defineProps<{
   cleared: TzzbClearedPosition[];
   /** 个基累计收益 */
   fundReturns: TzzbHoldingReturn[];
+  /** 聚焦账户类别（父级顶栏选中单账户时传入；null / 缺省 = 汇总口径：
+   * 隐藏「全部 / 个股 / 个基」切换并平铺两类；非空时自动选中对应类别，王总 2026-11-10 指定） */
+  focusKind?: 'stock' | 'fund' | null;
 }>();
 
 const emit = defineEmits<{
@@ -76,6 +79,16 @@ const VIEW_OPTIONS = [
 
 /** 当前筛选 */
 const kind = ref<string>('all');
+
+// 账户联动（王总 2026-11-10 指定）：聚焦股票账户 → 自动切「个股」；基金账户 → 「个基」；
+// 汇总口径 → 复位「全部」并隐藏切换（平铺两类）
+watch(
+  () => props.focusKind,
+  (k) => {
+    kind.value = k ?? 'all';
+  },
+  { immediate: true },
+);
 /** 当前 Top 档位 */
 const topN = ref<string>('5');
 /** 当前视图 */
@@ -351,7 +364,8 @@ const onHeatClick = (params: unknown): void => {
     <!-- 筛选行：视角 × 品种 × Top 档位 × 视图（Top / 视图仅总盈亏视角） -->
     <div class="mb-2 flex flex-wrap items-center gap-2">
       <BaseTabs v-model="perspective" :options="PERSPECTIVE_OPTIONS" class="self-start" />
-      <BaseTabs v-model="kind" :options="KIND_OPTIONS" class="self-start" />
+      <!-- 汇总口径（未聚焦单账户）隐藏品种切换：个股 + 个基平铺混排 -->
+      <BaseTabs v-if="props.focusKind" v-model="kind" :options="KIND_OPTIONS" class="self-start" />
       <div class="flex-1" />
       <template v-if="perspective === 'pnl'">
         <BaseTabs v-model="topN" :options="TOP_OPTIONS" class="self-start" />
@@ -394,73 +408,77 @@ const onHeatClick = (params: unknown): void => {
         </button>
       </div>
       <BaseEmpty v-else-if="contribRows.length === 0" text="操作贡献视角仅覆盖个股：窗口内无个股流水 / 清仓记录" />
-      <div v-else class="flex flex-col gap-3">
-        <!-- 摘要条 -->
-        <div class="grid grid-cols-2 gap-2 md:grid-cols-4">
-          <div class="rounded-lg bg-flat-weak/60 px-3 py-2">
-            <p class="text-xs text-text-tertiary">实际盈亏</p>
-            <p class="mt-0.5 font-mono text-base font-semibold tabular-nums" :class="plClass(analysisStore.contribution?.actualTotal ?? 0)">
-              {{ signYuan(analysisStore.contribution?.actualTotal ?? 0) }}
-            </p>
+      <!-- 内容包滚动容器：卡片是 xl 定高（30rem），摘要 + 散点 + 表格竖向
+           超出必须卡内滚动（对齐总盈亏排行视图），否则盖住下方卡片 -->
+      <div v-else class="min-h-0 flex-1 overflow-y-auto pr-0.5">
+        <div class="flex flex-col gap-3">
+          <!-- 摘要条（窄卡 2×2：四列在 40% 宽卡片里挤爆） -->
+          <div class="grid grid-cols-2 gap-2">
+            <div class="rounded-lg bg-flat-weak/60 px-3 py-2">
+              <p class="text-xs text-text-tertiary">实际盈亏</p>
+              <p class="mt-0.5 font-mono text-base font-semibold tabular-nums" :class="plClass(analysisStore.contribution?.actualTotal ?? 0)">
+                {{ signYuan(analysisStore.contribution?.actualTotal ?? 0) }}
+              </p>
+            </div>
+            <div class="rounded-lg bg-flat-weak/60 px-3 py-2">
+              <p class="text-xs text-text-tertiary">反事实（买入持有）</p>
+              <p class="mt-0.5 font-mono text-base font-semibold tabular-nums" :class="plClass(analysisStore.contribution?.counterfactualTotal ?? 0)">
+                {{ signYuan(analysisStore.contribution?.counterfactualTotal ?? 0) }}
+              </p>
+            </div>
+            <div class="rounded-lg bg-flat-weak/60 px-3 py-2">
+              <p class="text-xs text-text-tertiary">操作贡献（你的操作值多少）</p>
+              <p class="mt-0.5 font-mono text-base font-semibold tabular-nums" :class="plClass(analysisStore.contribution?.contributionTotal ?? 0)">
+                {{ signYuan(analysisStore.contribution?.contributionTotal ?? 0) }}
+              </p>
+            </div>
+            <div class="rounded-lg bg-flat-weak/60 px-3 py-2">
+              <p class="text-xs text-text-tertiary">计分覆盖</p>
+              <p class="mt-0.5 font-mono text-base font-semibold tabular-nums text-text">
+                {{ analysisStore.contribution?.rows.length ?? 0 }} 票
+              </p>
+              <p class="mt-0.5 text-xs text-text-tertiary">
+                未计分买入 {{ analysisStore.contribution?.unscoredBuys ?? 0 }} 笔（超 K 线覆盖 / 停牌）
+              </p>
+            </div>
           </div>
-          <div class="rounded-lg bg-flat-weak/60 px-3 py-2">
-            <p class="text-xs text-text-tertiary">反事实（买入持有）</p>
-            <p class="mt-0.5 font-mono text-base font-semibold tabular-nums" :class="plClass(analysisStore.contribution?.counterfactualTotal ?? 0)">
-              {{ signYuan(analysisStore.contribution?.counterfactualTotal ?? 0) }}
-            </p>
+          <!-- 死拿散点 -->
+          <div v-if="contribOption" class="h-56">
+            <BaseChart :options="contribOption" not-merge @chart-click="onContribClick" />
           </div>
-          <div class="rounded-lg bg-flat-weak/60 px-3 py-2">
-            <p class="text-xs text-text-tertiary">操作贡献（你的操作值多少）</p>
-            <p class="mt-0.5 font-mono text-base font-semibold tabular-nums" :class="plClass(analysisStore.contribution?.contributionTotal ?? 0)">
-              {{ signYuan(analysisStore.contribution?.contributionTotal ?? 0) }}
-            </p>
-          </div>
-          <div class="rounded-lg bg-flat-weak/60 px-3 py-2">
-            <p class="text-xs text-text-tertiary">计分覆盖</p>
-            <p class="mt-0.5 font-mono text-base font-semibold tabular-nums text-text">
-              {{ analysisStore.contribution?.rows.length ?? 0 }} 票
-            </p>
-            <p class="mt-0.5 text-xs text-text-tertiary">
-              未计分买入 {{ analysisStore.contribution?.unscoredBuys ?? 0 }} 笔（超 K 线覆盖 / 停牌）
-            </p>
-          </div>
+          <!-- 逐票贡献表 -->
+          <BaseTable
+            :columns="contribColumns"
+            :rows="contribRows"
+            :row-key="(r) => r.code"
+            :min-width="'720px'"
+            scroll-class="table-scroll-sm"
+            row-clickable
+            footer-text="单击开侧栏 / 双击进详情 · 反事实为 qfq 口径买入持有推演"
+            @row-click="(r) => emit('open', r.code)"
+            @row-dblclick="(r) => emit('openPage', r.code)"
+          >
+            <template #name="{ row }">
+              <span class="font-medium text-text">{{ row.name }}</span>
+              <span class="ml-1 font-mono text-xs text-text-tertiary">{{ row.code }}</span>
+            </template>
+            <template #buyAmount="{ row }">
+              <span class="font-mono tabular-nums">{{ row.buyAmount.toLocaleString('zh-CN', { maximumFractionDigits: 0 }) }}</span>
+            </template>
+            <template #actual="{ row }">
+              <span class="font-mono font-medium tabular-nums" :class="plClass(row.actual)">{{ signYuan(row.actual) }}</span>
+            </template>
+            <template #counterfactual="{ row }">
+              <span class="font-mono tabular-nums" :class="plClass(row.counterfactual)">{{ signYuan(row.counterfactual) }}</span>
+            </template>
+            <template #contribution="{ row }">
+              <span class="font-mono font-semibold tabular-nums" :class="plClass(row.contribution)">{{ signYuan(row.contribution) }}</span>
+            </template>
+          </BaseTable>
+          <p class="text-xs text-text-tertiary">
+            口径：实际 = 清仓回合盈亏合计（官方含费，持有中为已实现部分）；反事实 = 每笔买入按买入日 qfq 收盘持有到末日；浮动盈亏未计入
+          </p>
         </div>
-        <!-- 死拿散点 -->
-        <div v-if="contribOption" class="h-56">
-          <BaseChart :options="contribOption" not-merge @chart-click="onContribClick" />
-        </div>
-        <!-- 逐票贡献表 -->
-        <BaseTable
-          :columns="contribColumns"
-          :rows="contribRows"
-          :row-key="(r) => r.code"
-          :min-width="'720px'"
-          scroll-class="table-scroll-sm"
-          row-clickable
-          footer-text="单击开侧栏 / 双击进详情 · 反事实为 qfq 口径买入持有推演"
-          @row-click="(r) => emit('open', r.code)"
-          @row-dblclick="(r) => emit('openPage', r.code)"
-        >
-          <template #name="{ row }">
-            <span class="font-medium text-text">{{ row.name }}</span>
-            <span class="ml-1 font-mono text-xs text-text-tertiary">{{ row.code }}</span>
-          </template>
-          <template #buyAmount="{ row }">
-            <span class="font-mono tabular-nums">{{ row.buyAmount.toLocaleString('zh-CN', { maximumFractionDigits: 0 }) }}</span>
-          </template>
-          <template #actual="{ row }">
-            <span class="font-mono font-medium tabular-nums" :class="plClass(row.actual)">{{ signYuan(row.actual) }}</span>
-          </template>
-          <template #counterfactual="{ row }">
-            <span class="font-mono tabular-nums" :class="plClass(row.counterfactual)">{{ signYuan(row.counterfactual) }}</span>
-          </template>
-          <template #contribution="{ row }">
-            <span class="font-mono font-semibold tabular-nums" :class="plClass(row.contribution)">{{ signYuan(row.contribution) }}</span>
-          </template>
-        </BaseTable>
-        <p class="text-xs text-text-tertiary">
-          口径：实际 = 清仓回合盈亏合计（官方含费，持有中为已实现部分）；反事实 = 每笔买入按买入日 qfq 收盘持有到末日；浮动盈亏未计入
-        </p>
       </div>
     </template>
 
