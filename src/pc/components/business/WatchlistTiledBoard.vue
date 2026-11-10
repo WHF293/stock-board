@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed } from 'vue';
 import { VueDraggable } from 'vue-draggable-plus';
 import BaseCard from '../ui/BaseCard.vue';
 import MenuIcon from '../ui/MenuIcon.vue';
@@ -7,6 +7,7 @@ import { pluginKernel } from '../../../common/plugin/index';
 import { useWatchlistStore } from '../../../common/stores/watchlist';
 import { useNotificationsStore } from '../../../common/stores/notifications';
 import {
+  WATCHLIST_DEFAULT_SORT_MODE,
   WATCHLIST_GROUP_DRAG_ANIMATION_MS,
   WATCHLIST_GROUP_DRAG_GROUP,
   WATCHLIST_SORT_MODE_CYCLE,
@@ -35,7 +36,8 @@ import type { RegisteredStockRowAction, StockRowTarget } from '../../../common/t
  * hover 原位展开其余字段并浮现操作按钮（编辑分组归属 / 从本组移除）；
  * 卡片可拖拽到别的分组列 = 修改分组归属（同组内拖拽不动作），点击卡片进右侧个股详情侧栏（与表格行点击同一交互）；
  * 列头排序 icon 三态循环（2026-10-28 王总指定）：自定义拖拽顺序 → 涨跌幅升序 → 降序 → 自定义，
- * 排序态下禁用拖拽，切回自定义后恢复组内拖拽顺序（会话内状态，不持久化）
+ * 2026-11-10 起缺省排序改为降序（涨跌幅从高到低），且每个分组独立持久化记住用户选择的排序模式
+ * （随 watchlist store 落盘，刷新不丢）；排序态下禁用拖拽，切回自定义后恢复组内拖拽顺序
  */
 const props = defineProps<{
   /** 展示的分组列表（已按分组设置排序并过滤隐藏） */
@@ -204,26 +206,29 @@ const persistGroups = (): void => {
   watchlistStore.$persist();
 };
 
-// ---------- 分组内涨跌幅排序（2026-10-28 王总指定：自定义 → 升序 → 降序 → 自定义 三态循环） ----------
-
-/** 各分组当前排序模式（会话内状态，不持久化；缺省 = custom 自定义拖拽顺序） */
-const sortModes = ref<Record<string, WatchlistSortMode>>({});
-
-/**
- * 读某分组当前排序模式
- * @param groupId 分组 id
- * @returns 排序模式（未切换过 = custom）
- */
-const sortModeOf = (groupId: string): WatchlistSortMode => sortModes.value[groupId] ?? 'custom';
+// ---------- 分组内涨跌幅排序（三态循环：自定义 → 升序 → 降序 → 自定义） ----------
+//
+// 2026-11-10 王总指定：缺省改为按涨跌幅降序（desc，从高到低），
+// 且每个分组独立持久化记住用户选择的排序模式（随 watchlist store 落盘）
 
 /**
- * 点击排序 icon：按「自定义 → 升序 → 降序 → 自定义」循环切换
- * @param groupId 分组 id
+ * 读某分组当前排序模式（分组未存过 sortMode 的旧数据按缺省 desc 兜底）
+ * @param group 分组
+ * @returns 排序模式
  */
-const cycleSortMode = (groupId: string): void => {
-  const current = sortModeOf(groupId);
-  const index = WATCHLIST_SORT_MODE_CYCLE.indexOf(current);
-  sortModes.value[groupId] = WATCHLIST_SORT_MODE_CYCLE[(index + 1) % WATCHLIST_SORT_MODE_CYCLE.length];
+const sortModeOf = (group: WatchlistGroup): WatchlistSortMode =>
+  group.sortMode ?? WATCHLIST_DEFAULT_SORT_MODE;
+
+/**
+ * 点击排序 icon：按「自定义 → 升序 → 降序 → 自定义」循环切换，写回 store 持久化
+ * @param group 分组
+ */
+const cycleSortMode = (group: WatchlistGroup): void => {
+  const index = WATCHLIST_SORT_MODE_CYCLE.indexOf(sortModeOf(group));
+  watchlistStore.setGroupSortMode(
+    group.id,
+    WATCHLIST_SORT_MODE_CYCLE[(index + 1) % WATCHLIST_SORT_MODE_CYCLE.length],
+  );
 };
 
 /**
@@ -233,7 +238,7 @@ const cycleSortMode = (groupId: string): void => {
  * @returns 展示用条目列表
  */
 const displayStocks = (group: WatchlistGroup): WatchlistStock[] => {
-  const mode = sortModeOf(group.id);
+  const mode = sortModeOf(group);
   if (mode === 'custom') {
     return group.stocks;
   }
@@ -274,12 +279,12 @@ const onStocksReorder = (group: WatchlistGroup, stocks: WatchlistStock[]): void 
             type="button"
             data-track="WATCHLIST_GROUP_SORT"
             class="pressable rounded p-1 text-text-tertiary hover:bg-flat-weak hover:text-text active:scale-90"
-            :class="{ 'bg-flat-weak text-text': sortModeOf(group.id) !== 'custom' }"
-            :title="WATCHLIST_SORT_MODE_TITLE[sortModeOf(group.id)]"
-            :aria-label="WATCHLIST_SORT_MODE_TITLE[sortModeOf(group.id)]"
-            @click="cycleSortMode(group.id)"
+            :class="{ 'bg-flat-weak text-text': sortModeOf(group) !== 'custom' }"
+            :title="WATCHLIST_SORT_MODE_TITLE[sortModeOf(group)]"
+            :aria-label="WATCHLIST_SORT_MODE_TITLE[sortModeOf(group)]"
+            @click="cycleSortMode(group)"
           >
-            <MenuIcon :name="WATCHLIST_SORT_MODE_ICON[sortModeOf(group.id)]" :size="14" />
+            <MenuIcon :name="WATCHLIST_SORT_MODE_ICON[sortModeOf(group)]" :size="14" />
           </button>
           <button
             type="button"
@@ -308,7 +313,7 @@ const onStocksReorder = (group: WatchlistGroup, stocks: WatchlistStock[]): void 
            升 / 降序态下禁拖并按涨跌幅展示，恢复自定义后回到拖拽顺序） -->
       <VueDraggable
         :model-value="displayStocks(group)"
-        :disabled="sortModeOf(group.id) !== 'custom'"
+        :disabled="sortModeOf(group) !== 'custom'"
         tag="div"
         :group="WATCHLIST_GROUP_DRAG_GROUP"
         :animation="WATCHLIST_GROUP_DRAG_ANIMATION_MS"

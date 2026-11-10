@@ -4,11 +4,13 @@ import { appStorage } from '../utils/app-local-storage';
 import {
   DEFAULT_GROUP_ID,
   DEFAULT_GROUP_NAME,
+  WATCHLIST_DEFAULT_SORT_MODE,
+  WATCHLIST_SORT_MODES,
   WATCHLIST_SYMBOL_PATTERN,
 } from '../constants/watchlist.constants.ts';
 import { toFullSymbol } from '../utils/to-full-symbol';
 import { repairWatchlistGroups } from '../utils/repair-watchlist-groups';
-import type { WatchlistGroup, WatchlistStock } from '../types/watchlist.types.ts';
+import type { WatchlistGroup, WatchlistSortMode, WatchlistStock } from '../types/watchlist.types.ts';
 
 /** 自选股 store 状态 */
 interface WatchlistState {
@@ -23,7 +25,9 @@ interface WatchlistState {
  */
 export const useWatchlistStore = defineStore('watchlist', {
   state: (): WatchlistState => ({
-    groups: [{ id: DEFAULT_GROUP_ID, name: DEFAULT_GROUP_NAME, stocks: [] }],
+    groups: [
+      { id: DEFAULT_GROUP_ID, name: DEFAULT_GROUP_NAME, stocks: [], sortMode: WATCHLIST_DEFAULT_SORT_MODE },
+    ],
   }),
 
   getters: {
@@ -115,6 +119,23 @@ export const useWatchlistStore = defineStore('watchlist', {
     },
 
     /**
+     * 设置某分组的排序模式并持久化（每个分组独立记忆，2026-11-10 王总指定）
+     * @param groupId 分组 id
+     * @param mode 排序模式（custom / asc / desc）
+     */
+    setGroupSortMode(groupId: string, mode: WatchlistSortMode): void {
+      if (!WATCHLIST_SORT_MODES.includes(mode)) {
+        return;
+      }
+      const target = this.groups.find((group) => group.id === groupId);
+      if (!target || target.sortMode === mode) {
+        return;
+      }
+      target.sortMode = mode;
+      this.$persist();
+    },
+
+    /**
      * 跨分组移动一只股票（平铺看板拖拽落列后调用）
      *
      * 语义 = 从源分组移除 + 加入目标分组（原条目的 `addedAt` 与名称原样保留）；
@@ -174,6 +195,7 @@ export const useWatchlistStore = defineStore('watchlist', {
         id: crypto.randomUUID(),
         name,
         stocks: [],
+        sortMode: WATCHLIST_DEFAULT_SORT_MODE,
       };
       this.groups.push(group);
       this.$persist();
@@ -284,7 +306,12 @@ export const useWatchlistStore = defineStore('watchlist', {
           }
         }
       } else {
-        this.groups.push({ id: incoming.id, name: incoming.name, stocks: incoming.stocks.map((stock) => ({ ...stock })) });
+        this.groups.push({
+          id: incoming.id,
+          name: incoming.name,
+          stocks: incoming.stocks.map((stock) => ({ ...stock })),
+          sortMode: incoming.sortMode ?? WATCHLIST_DEFAULT_SORT_MODE,
+        });
         groupsAdded += 1;
         stocksAdded += incoming.stocks.length;
       }

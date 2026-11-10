@@ -25,6 +25,12 @@ export const WATCHLIST_GROUP_DRAG_ANIMATION_MS = 150;
 /** 看板分组内排序模式（custom = 自定义拖拽顺序，asc / desc = 按涨跌幅） */
 export const WATCHLIST_SORT_MODES = ['custom', 'asc', 'desc'] as const;
 
+/**
+ * 分组排序缺省模式（2026-11-10 王总指定：默认按涨跌幅从高到低）。
+ * 分组未存过 sortMode（含旧数据）时按此兜底
+ */
+export const WATCHLIST_DEFAULT_SORT_MODE: WatchlistSortMode = 'desc';
+
 /** 看板分组内排序 icon 点击时的循环顺序（自定义 → 升序 → 降序 → 自定义） */
 export const WATCHLIST_SORT_MODE_CYCLE: readonly WatchlistSortMode[] = [
   'custom',
