@@ -62,7 +62,10 @@ const accountFilter = ref('');
 /** 记录里出现过的账户（id → 账户名；已删除账户兜底显示 id 前 8 位） */
 const accountOptions = computed(() => {
   const ids = [...new Set(tradeRecords.value.map((record) => record.accountId))];
-  const nameById = new Map(accountStore.accounts.map((account) => [account.id, account.name]));
+  const nameById = new Map<string, string>();
+  for (const account of accountStore.accounts) nameById.set(account.id, account.name);
+  // 账本流水（MCP 合并）无账户维度，归入固定虚拟账户
+  nameById.set('tzzb-mcp', '投资账本（MCP）');
   return ids.map((id) => ({ id, name: nameById.get(id) ?? `账户 ${id.slice(0, 8)}` }));
 });
 
@@ -85,7 +88,7 @@ watch(accountOptions, (options) => {
   <div class="flex min-h-0 flex-1 flex-col">
     <!-- 顶部：账户筛选（≥2 账户时显示）+ 数据来源说明 -->
     <div class="flex shrink-0 items-center justify-between gap-2 pb-2">
-      <span class="text-xs text-text-tertiary">来源：账户成交流水（本机数据库）</span>
+      <span class="text-xs text-text-tertiary">来源：本机成交流水 + 投资账本（MCP）合并</span>
       <select
         v-if="accountOptions.length > 1"
         v-model="accountFilter"

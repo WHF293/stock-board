@@ -88,6 +88,13 @@ const tokenEndpoint = (): string => `${upstreamOrigin}/oauth2/token`;
 
 /**
  * 带默认头的 tauriFetch（UA 指纹统一）
+ *
+ * **Origin: '' 必传**：tauri-plugin-http 默认会自动附加 webview 来源
+ * `Origin: http://tauri.localhost`（Windows），上游 hexin-waf / OAuth 服务的
+ * CORS 白名单不认它，POST oauth2/* 一律 403 "Invalid CORS request"（纯文本体，
+ * 表现为「注册失败: {}」——2026-11-10 打包版授权失败根因）。插件在
+ * unsafe-headers feature 下收到空 Origin 会显式删除该头（commands.rs L305-309），
+ * 请求回落为无 Origin 的服务端风格，上游正常放行。
  * @param url 请求地址
  * @param init 请求初始化（headers 与默认头合并，init 优先）
  * @returns 上游响应
@@ -95,7 +102,11 @@ const tokenEndpoint = (): string => `${upstreamOrigin}/oauth2/token`;
 const upstreamFetch = (url: string, init: RequestInit): Promise<Response> =>
   tauriFetch(url, {
     ...init,
-    headers: { 'User-Agent': UPSTREAM_USER_AGENT, ...(init.headers as Record<string, string>) },
+    headers: {
+      Origin: '',
+      'User-Agent': UPSTREAM_USER_AGENT,
+      ...(init.headers as Record<string, string>),
+    },
   });
 
 /**
@@ -114,8 +125,16 @@ const postForm = async (
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams(params).toString(),
   });
-  const json = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-  if (!res.ok) throw new Error(`${url} ${res.status}: ${JSON.stringify(json).slice(0, 300)}`);
+  // 先读原文再解析：非 JSON 错误体（WAF 回显 / 纯文本拒绝）原文进 message，不吞成 {}
+  const text = await res.text();
+  const json = ((): Record<string, unknown> => {
+    try {
+      return JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  })();
+  if (!res.ok) throw new Error(`${url} ${res.status}: ${text.slice(0, 300) || '（空响应体）'}`);
   return json;
 };
 
@@ -305,8 +324,18 @@ const ensureRegistration = async (
       redirect_uris: [REDIRECT_URI],
     }),
   });
-  const reg = (await res.json().catch(() => ({}))) as NonNullable<TzzbDirectStore['registration']>;
-  if (!reg.client_id) throw new Error(`注册失败: ${JSON.stringify(reg).slice(0, 300)}`);
+  // 先读原文再解析：上游异常（WAF 回显 / CORS 拒绝纯文本）时错误信息要带状态码与原文，不吞
+  const regText = await res.text();
+  const reg = ((): NonNullable<TzzbDirectStore['registration']> => {
+    try {
+      return JSON.parse(regText) as NonNullable<TzzbDirectStore['registration']>;
+    } catch {
+      return {};
+    }
+  })();
+  if (!res.ok || !reg.client_id) {
+    throw new Error(`注册失败 HTTP ${res.status}: ${regText.slice(0, 300) || '（空响应体）'}`);
+  }
   store.registration = reg;
   saveStore(store);
   return reg;

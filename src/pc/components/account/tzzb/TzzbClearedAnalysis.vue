@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, onBeforeUnmount, ref, watch, type ComponentPublicInstance, type CSSProperties } from 'vue';
 import type { EChartsCoreOption } from 'echarts/core';
 import { CHART_AXIS_LINE_COLOR, CHART_SPLIT_LINE_COLOR, CHART_TEXT_COLOR } from '../../../../common/constants/chart.constants.ts';
 import { DOWN_COLOR, UP_COLOR } from '../../../../common/constants/stock-colors.constants.ts';
@@ -12,6 +12,7 @@ import type { TableColumn } from '../../../../common/types/table.types.ts';
 import type {
   TzzbClearedPosition,
   TzzbDayCalendar,
+  TzzbFundCycle,
   TzzbHoldingReturn,
 } from '../../../../common/types/tzzb.types.ts';
 
@@ -20,10 +21,13 @@ import type {
  *
  * 按建清仓周期逐笔分析个股 / 个基的盈亏与费用：
  * - 个股：queryClearedPosition 完整买卖回合（盈亏、收益率、费用、费用/|盈亏|、持有天数、回合数），
- *   顶部汇总条给出累计盈亏 / 累计费用 / 胜率 / 平均持有天数，并按持有天数分桶（短线/波段/中线/长线）；
+ *   顶部汇总条给出累计盈亏 / 累计费用 / 胜率 / 平均持有天数，并按持有天数分桶（短线/中线/长线，阈值可配置）；
  * - 个基：15 工具无基金清仓周期（queryClearedPosition 仅覆盖股票），
- *   当前以 queryFundHoldingReturns 累计持仓收益口径展示，费用字段缺失显示 —；
- *   正式版如有基金清仓工具再对齐周期口径
+ *   持有周期视图由申赎流水本地重构「首笔申购 → 份额清零」回合（estProfit 为现金流估算）；
+ *   累计收益视图保持 queryFundHoldingReturns 口径，费用字段缺失显示 —；
+ * - 长短线维度（王总 2026-11-10 指定）：短线 ≤5 天 / 中线 6~15 天 / 长线 >15 天（默认），
+ *   阈值可自定义并持久化 localStorage（不同人对长短线天数认知不同）；
+ *   点击桶卡片筛选下方明细，再点取消
  * - 盈亏质量条（操作复盘阶段 2 新增，方案 §4.5，纯本地计算）：
  *   胜率×盈亏比组合（官方裸胜率不回答「赚得稳不稳」）、最长连亏天数、单日盈亏分布直方图
  */
@@ -32,6 +36,8 @@ const props = defineProps<{
   cleared: TzzbClearedPosition[];
   /** 个基累计持仓收益 */
   fundReturns: TzzbHoldingReturn[];
+  /** 基金持仓回合（本地由申赎流水重构，持有周期视图用） */
+  fundCycles: TzzbFundCycle[];
   /** 可选盈亏日历（当前月；单日盈亏分布与连亏统计的数据源，缺省时对应项显示 —） */
   dayCalendar?: TzzbDayCalendar | null;
 }>();
@@ -48,6 +54,13 @@ const KIND_OPTIONS = [
   { label: '个基', value: 'fund' },
 ];
 const kind = ref<string>('stock');
+
+/** 个基明细形态：cycle 持有周期（长短线分桶）/ holding 累计收益（原口径） */
+const FUND_VIEW_OPTIONS = [
+  { label: '持有周期', value: 'cycle' },
+  { label: '累计收益', value: 'holding' },
+];
+const fundView = ref<string>('cycle');
 
 /** 个股明细形态：cycle 逐周期平铺 / summary 按个股汇总（点击分组展开该股周期明细） */
 const STOCK_VIEW_OPTIONS = [
@@ -70,7 +83,7 @@ const toggleStockExpand = (code: string): void => {
   expandedStocks.value = next;
 };
 
-/** 个股汇总分组（按合计盈亏降序；周期按开仓日排序） */
+/** 个股汇总分组（按合计盈亏降序；周期按开仓日排序；点击桶筛选后跟随过滤） */
 const stockSummaryGroups = computed(() => {
   const map = new Map<
     string,
@@ -85,7 +98,7 @@ const stockSummaryGroups = computed(() => {
       holdDays: number;
     }
   >();
-  for (const r of props.cleared) {
+  for (const r of filteredCycles.value) {
     const g = map.get(r.code) ?? {
       code: r.code,
       name: r.name,
@@ -170,25 +183,169 @@ const stockSummary = computed(() => {
   };
 });
 
-/** 持有天数分桶（仅已清仓周期） */
-const HOLD_BUCKETS = [
-  { label: '短线 ≤7 天', test: (d: number) => d <= 7 },
-  { label: '波段 8~30 天', test: (d: number) => d > 7 && d <= 30 },
-  { label: '中线 31~180 天', test: (d: number) => d > 30 && d <= 180 },
-  { label: '长线 >180 天', test: (d: number) => d > 180 },
-] as const;
+/* ---------------- 长短线分桶（王总 2026-11-10 指定，阈值可配置并持久化） ----------------
+ * 默认：短线 ≤5 天 / 中线 6~15 天 / 长线 >15 天；不同人对长短线天数认知不同，
+ * 阈值输入框即改即用，写入 localStorage（tzzb.holdBuckets.v1）跨会话记住。
+ * 个股用清仓周期 holdDays（含持有中，按截至今天的天数归桶并单独计数）；
+ * 个基持有周期视图用申赎流水重构的回合（TzzbFundCycle.holdDays），口径一致 */
 
-/** 分桶统计：周期数 / 盈亏合计 / 胜率 / 费用合计 */
-const buckets = computed(() =>
-  HOLD_BUCKETS.map((b) => {
-    const rows = closedCycles.value.filter((r) => b.test(r.holdDays));
-    const profit = rows.reduce((s, r) => s + r.profit, 0);
+/** 阈值持久化键 */
+const HOLD_CFG_KEY = 'tzzb.holdBuckets.v1';
+
+/** 短线阈值（持有 ≤N 天） */
+const shortDays = ref(5);
+
+/** 中线阈值（>短线 且 ≤N 天；超过即长线） */
+const midDays = ref(15);
+
+// 启动时恢复上次保存的阈值（坏数据 / 越界静默回落默认值）
+try {
+  const raw = localStorage.getItem(HOLD_CFG_KEY);
+  if (raw) {
+    const p = JSON.parse(raw) as { short?: unknown; mid?: unknown };
+    const s = Number(p.short);
+    const m = Number(p.mid);
+    if (Number.isFinite(s) && s >= 1) shortDays.value = Math.round(s);
+    if (Number.isFinite(m) && m >= 1) midDays.value = Math.round(m);
+  }
+} catch {
+  /* 坏数据：走默认阈值 */
+}
+
+// 阈值即改即存（只在两边都合法时写盘，输入中途的空值不落盘）
+watch([shortDays, midDays], ([s, m]) => {
+  if (!Number.isFinite(s) || !Number.isFinite(m) || s < 1 || m < 1) return;
+  try {
+    localStorage.setItem(HOLD_CFG_KEY, JSON.stringify({ short: Math.round(s), mid: Math.round(m) }));
+  } catch {
+    /* 持久化失败不影响使用 */
+  }
+});
+
+/** 有效分桶边界（中线阈值小于短线时夹到短线+1，保证三桶不重叠） */
+const effShort = computed(() => Math.max(1, Math.round(shortDays.value) || 1));
+const effMid = computed(() => Math.max(effShort.value + 1, Math.round(midDays.value) || effShort.value + 1));
+
+interface HoldBucketDef {
+  key: 'short' | 'mid' | 'long';
+  label: string;
+  rangeLabel: string;
+  test: (d: number) => boolean;
+}
+
+/** 三桶定义（label 随阈值联动） */
+const holdBuckets = computed<HoldBucketDef[]>(() => [
+  { key: 'short', label: '短线', rangeLabel: `≤${effShort.value} 天`, test: (d) => d <= effShort.value },
+  { key: 'mid', label: '中线', rangeLabel: `${effShort.value + 1}~${effMid.value} 天`, test: (d) => d > effShort.value && d <= effMid.value },
+  { key: 'long', label: '长线', rangeLabel: `>${effMid.value} 天`, test: (d) => d > effMid.value },
+]);
+
+/** 当前点击选中的桶（null = 不筛选；再点同桶取消） */
+const activeBucket = ref<HoldBucketDef['key'] | null>(null);
+
+/**
+ * 切换桶筛选
+ * @param key 桶 key
+ */
+const toggleBucket = (key: HoldBucketDef['key']): void => {
+  activeBucket.value = activeBucket.value === key ? null : key;
+};
+
+/** 选中桶的持有天数判定；null = 不筛选 */
+const bucketTest = computed(() => holdBuckets.value.find((b) => b.key === activeBucket.value)?.test ?? null);
+
+/** 个股周期明细（选中桶时按持有天数过滤，否则全量） */
+const filteredCycles = computed(() => {
+  const t = bucketTest.value;
+  return t ? props.cleared.filter((r) => t(r.holdDays)) : props.cleared;
+});
+
+/** 桶内成员聚合行（按品种合并周期） */
+interface BucketMember {
+  code: string;
+  name: string;
+  /** 该品种在本桶的周期笔数（>1 时标注 ×N） */
+  count: number;
+  /** 盈亏合计（个股 = 周期盈亏；个基 = 现金流估算） */
+  profit: number;
+  /** 费用合计（个基无口径恒为 0，模板不展示） */
+  fee: number;
+}
+
+/** 桶内个股成员（王总 2026-11-10 指定：每个桶标注有哪些票、各自赚/亏与费用；按 |盈亏| 降序） */
+const stockBucketMembers = computed<Record<string, BucketMember[]>>(() =>
+  Object.fromEntries(
+    holdBuckets.value.map((b) => {
+      const map = new Map<string, BucketMember>();
+      for (const r of props.cleared) {
+        if (!b.test(r.holdDays)) continue;
+        const g = map.get(r.code) ?? { code: r.code, name: r.name, count: 0, profit: 0, fee: 0 };
+        g.count += 1;
+        g.profit += r.profit;
+        g.fee += r.fee;
+        map.set(r.code, g);
+      }
+      return [b.key, [...map.values()].sort((a, c) => Math.abs(c.profit) - Math.abs(a.profit))];
+    }),
+  ),
+);
+
+/** 桶内个基成员（费用无口径不展示；按 |估算盈亏| 降序） */
+const fundBucketMembers = computed<Record<string, BucketMember[]>>(() =>
+  Object.fromEntries(
+    holdBuckets.value.map((b) => {
+      const map = new Map<string, BucketMember>();
+      for (const r of props.fundCycles) {
+        if (!b.test(r.holdDays)) continue;
+        const g = map.get(r.code) ?? { code: r.code, name: r.name, count: 0, profit: 0, fee: 0 };
+        g.count += 1;
+        g.profit += r.estProfit;
+        map.set(r.code, g);
+      }
+      return [b.key, [...map.values()].sort((a, c) => Math.abs(c.profit) - Math.abs(a.profit))];
+    }),
+  ),
+);
+
+/** 个股分桶统计（含持有中：盈亏合计含持有中浮亏口径与顶部汇总条一致） */
+const stockBuckets = computed(() =>
+  holdBuckets.value.map((b) => {
+    const rows = props.cleared.filter((r) => b.test(r.holdDays));
+    const closed = rows.filter((r) => r.closeDate);
     return {
+      key: b.key,
       label: b.label,
+      rangeLabel: b.rangeLabel,
       count: rows.length,
-      profit,
+      holding: rows.length - closed.length,
+      profit: rows.reduce((s, r) => s + r.profit, 0),
       fee: rows.reduce((s, r) => s + r.fee, 0),
-      winRate: rows.length > 0 ? rows.filter((r) => r.profit > 0).length / rows.length : null,
+      winRate: closed.length > 0 ? closed.filter((r) => r.profit > 0).length / closed.length : null,
+      avgHold: rows.length > 0 ? rows.reduce((s, r) => s + r.holdDays, 0) / rows.length : null,
+    };
+  }),
+);
+
+/** 个基回合明细（选中桶时按持有天数过滤） */
+const filteredFundCycles = computed(() => {
+  const t = bucketTest.value;
+  return t ? props.fundCycles.filter((r) => t(r.holdDays)) : props.fundCycles;
+});
+
+/** 个基分桶统计（盈亏用现金流估算口径） */
+const fundBuckets = computed(() =>
+  holdBuckets.value.map((b) => {
+    const rows = props.fundCycles.filter((r) => b.test(r.holdDays));
+    const closed = rows.filter((r) => r.closeDate);
+    return {
+      key: b.key,
+      label: b.label,
+      rangeLabel: b.rangeLabel,
+      count: rows.length,
+      holding: rows.length - closed.length,
+      profit: rows.reduce((s, r) => s + r.estProfit, 0),
+      winRate: closed.length > 0 ? closed.filter((r) => r.estProfit > 0).length / closed.length : null,
+      avgHold: rows.length > 0 ? rows.reduce((s, r) => s + r.holdDays, 0) / rows.length : null,
     };
   }),
 );
@@ -358,6 +515,118 @@ const fundColumns: TableColumn<TzzbHoldingReturn>[] = [
   { key: 'rate', label: '累计收益率', align: 'right', sortable: true, sortValue: (r) => r.rate },
   { key: 'fee', label: '费用', align: 'right' },
 ];
+
+/** 个基持仓回合列（持有周期视图；盈亏为申赎现金流估算） */
+const fundCycleColumns: TableColumn<TzzbFundCycle>[] = [
+  { key: 'name', label: '基金', sortable: true, sortValue: (r) => r.name },
+  { key: 'period', label: '周期（开 → 清）', sortable: true, sortValue: (r) => r.openDate },
+  { key: 'holdDays', label: '天数', align: 'right', sortable: true, sortValue: (r) => r.holdDays },
+  { key: 'buyAmount', label: '投入', align: 'right', sortable: true, sortValue: (r) => r.buyAmount },
+  { key: 'sellAmount', label: '回收', align: 'right', sortable: true, sortValue: (r) => r.sellAmount },
+  { key: 'estProfit', label: '估算盈亏', align: 'right', sortable: true, sortValue: (r) => r.estProfit },
+];
+
+/* ---------------- 明细表行裁剪（默认收起，王总 2026-11-10 指定，交互对齐市场总览指数） ----------------
+ * 复用 .row-clamp（theme.css）的裁剪 + 高度过渡；测量逻辑针对表格改写：
+ * 收起 = 表头 + 前 N 行数据（指数卡的「首行」对表格即表头，只露表头没有信息量），
+ * 展开 = 表格自然高（BaseTable 滚动容器 table-scroll-sm 封顶 400px，超出后内部滚动）。
+ * 「按个股汇总」视图不套裁剪——分组行本身就是默认收起的，各有各的展开开关。 */
+
+/** 收起态可见的数据行数（表头 + 前 N 行） */
+const COLLAPSED_ROW_COUNT = 3;
+
+/** 裁剪底部阴影呼吸位（px）：必须与 theme.css `.row-clamp` 的 padding-bottom 同步 */
+const CLAMP_BOTTOM_ALLOWANCE_PX = 12;
+
+/** 裁剪容器内的明细表包装元素（函数 ref 绑定） */
+const recordsRef = ref<HTMLElement | null>(null);
+
+/** 收起态可见高度（表头 + N 行，px） */
+const recordsRowHeight = ref(0);
+
+/** 展开态高度（包装元素自然渲染高，px） */
+const recordsFullHeight = ref(0);
+
+/** 展开态（默认收起） */
+const recordsExpanded = ref(false);
+
+// 切维度 / 切视图时重置桶筛选与明细展开态（筛选只对当前视图生效，不跨场残留）
+watch([kind, fundView, stockView], () => {
+  activeBucket.value = null;
+  recordsExpanded.value = false;
+});
+
+/** 表头 + N 行之外是否还有内容（没有则不裁剪、不渲染开关） */
+const recordsHasOverflow = computed<boolean>(
+  () => recordsFullHeight.value - recordsRowHeight.value > 1,
+);
+
+/** 裁剪容器内联高度；首帧未实测时不写死，避免从 0 高跳一下 */
+const recordsClampStyle = computed<CSSProperties>(() =>
+  recordsRowHeight.value > 0
+    ? {
+        height: `${
+          (recordsExpanded.value ? recordsFullHeight.value : recordsRowHeight.value) +
+          CLAMP_BOTTOM_ALLOWANCE_PX
+        }px`,
+      }
+    : {},
+);
+
+/** 实测收起 / 展开高度（隐藏态尺寸为 0 时保留上次实测值，KeepAlive 缓存页不跳变） */
+const measureRecords = (): void => {
+  const wrap = recordsRef.value;
+  if (!wrap) return;
+  const wrapRect = wrap.getBoundingClientRect();
+  if (wrapRect.width === 0) return;
+  const table = wrap.querySelector('table');
+  if (!table) {
+    recordsRowHeight.value = 0;
+    recordsFullHeight.value = 0;
+    return;
+  }
+  recordsFullHeight.value = Math.round(wrapRect.height);
+  const rows = table.querySelectorAll('tbody tr');
+  const visible = Math.min(COLLAPSED_ROW_COUNT, rows.length);
+  if (visible === 0) {
+    recordsRowHeight.value = recordsFullHeight.value;
+    return;
+  }
+  const tableTop = table.getBoundingClientRect().top;
+  const nthRowBottom = rows[visible - 1].getBoundingClientRect().bottom;
+  recordsRowHeight.value = Math.round(nthRowBottom - tableTop);
+};
+
+/** 切换明细表展开 / 收起 */
+const toggleRecordsExpanded = (): void => {
+  recordsExpanded.value = !recordsExpanded.value;
+};
+
+/** 明细表裁剪观察器（包装元素尺寸变化即重测：数据刷新 / 视图切换 / 列宽变化） */
+let recordsObserver: ResizeObserver | null = null;
+
+/**
+ * 函数式模板 ref：包装元素一挂载就实测并开始观察，卸载即断开
+ * @param el 模板元素（卸载时为 null）
+ */
+const setRecordsRef = (el: Element | ComponentPublicInstance | null): void => {
+  const next = el instanceof HTMLElement ? el : null;
+  if (next === recordsRef.value) return;
+  recordsObserver?.disconnect();
+  recordsObserver = null;
+  recordsRef.value = next;
+  if (!next) return;
+  measureRecords();
+  if (typeof ResizeObserver !== 'undefined') {
+    recordsObserver = new ResizeObserver(measureRecords);
+    recordsObserver.observe(next);
+  }
+};
+
+onBeforeUnmount(() => {
+  recordsObserver?.disconnect();
+  recordsObserver = null;
+});
 </script>
 
 <template>
@@ -366,15 +635,43 @@ const fundColumns: TableColumn<TzzbHoldingReturn>[] = [
     text="暂无建清仓数据：同步投资账本后自动生成周期分析"
   />
   <div v-else class="flex flex-col gap-3">
-    <!-- 维度切换 + 个股明细形态切换 -->
+    <!-- 维度切换 + 个股明细形态 / 个基视图切换 -->
     <div class="flex items-center justify-between gap-2">
       <BaseTabs v-model="kind" :options="KIND_OPTIONS" />
       <div class="flex items-center gap-2">
-        <span v-if="kind === 'fund'" class="text-xs text-text-tertiary">
-          个基暂无清仓周期工具，当前为累计持仓收益口径（费用缺失显示 —）
-        </span>
+        <BaseTabs v-if="kind === 'fund'" v-model="fundView" :options="FUND_VIEW_OPTIONS" />
         <BaseTabs v-if="kind === 'stock'" v-model="stockView" :options="STOCK_VIEW_OPTIONS" />
       </div>
+    </div>
+
+    <!-- 长短线阈值（公共配置：个股分桶 + 个基持有周期分桶共用；即改即存 localStorage） -->
+    <div
+      v-if="kind === 'stock' || (kind === 'fund' && fundView === 'cycle')"
+      class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-text-tertiary"
+    >
+      <span class="font-medium text-text-secondary">长短线阈值</span>
+      <label class="flex items-center gap-1">
+        短线 ≤
+        <input
+          v-model.number="shortDays"
+          type="number"
+          min="1"
+          class="w-14 rounded border border-flat-weak bg-transparent px-1.5 py-0.5 text-center font-mono text-text focus:border-primary focus:outline-none"
+          aria-label="短线最大持有天数"
+        />
+        天
+      </label>
+      <label class="flex items-center gap-1">
+        中线 ≤
+        <input
+          v-model.number="midDays"
+          type="number"
+          min="1"
+          class="w-14 rounded border border-flat-weak bg-transparent px-1.5 py-0.5 text-center font-mono text-text focus:border-primary focus:outline-none"
+          aria-label="中线最大持有天数"
+        />
+        天（超过即长线）· 自动保存
+      </label>
     </div>
 
     <!-- 个股：汇总条 + 分桶 + 周期明细 -->
@@ -447,27 +744,62 @@ const fundColumns: TableColumn<TzzbHoldingReturn>[] = [
         </div>
       </div>
 
-      <!-- 持有天数分桶 -->
-      <div class="grid grid-cols-2 gap-2 md:grid-cols-4">
-        <div
-          v-for="b in buckets"
-          :key="b.label"
-          class="rounded-lg border border-flat-weak px-3 py-2"
-        >
-          <p class="text-xs text-text-secondary">{{ b.label }}</p>
-          <p class="mt-0.5 text-xs text-text-tertiary">
-            {{ b.count }} 笔 · 费用 {{ yuan(b.fee) }}
-            <template v-if="b.winRate !== null">· 胜率 {{ (b.winRate * 100).toFixed(0) }}%</template>
-          </p>
-          <p
-            v-if="b.count > 0"
-            class="font-mono text-sm font-semibold tabular-nums"
-            :class="plClass(b.profit)"
+      <!-- 长短线分桶（阈值见上方公共配置行；点击桶筛选明细；股票口径 = 清仓周期 holdDays） -->
+      <div class="flex flex-col gap-1.5">
+        <div class="grid grid-cols-3 gap-2">
+          <button
+            v-for="b in stockBuckets"
+            :key="b.key"
+            type="button"
+            class="rounded-lg border px-3 py-2 text-left transition-colors"
+            :class="activeBucket === b.key ? 'border-primary bg-primary/5' : 'border-flat-weak hover:bg-flat-weak/40'"
+            :title="activeBucket === b.key ? '点击取消筛选' : '点击筛选该桶明细'"
+            @click="toggleBucket(b.key)"
           >
-            {{ signYuan(b.profit) }}
-          </p>
-          <p v-else class="font-mono text-sm text-text-tertiary">—</p>
+            <p class="text-xs text-text-secondary">
+              {{ b.label }}
+              <span class="text-text-tertiary">（{{ b.rangeLabel }}）</span>
+            </p>
+            <p class="mt-0.5 text-xs text-text-tertiary">
+              {{ b.count }} 笔<template v-if="b.holding > 0">（持有中 {{ b.holding }}）</template>
+              <template v-if="b.winRate !== null">· 胜率 {{ (b.winRate * 100).toFixed(0) }}%</template>
+              <template v-if="b.avgHold !== null">· 均 {{ b.avgHold.toFixed(1) }} 天</template>
+            </p>
+            <p
+              v-if="b.count > 0"
+              class="font-mono text-sm font-semibold tabular-nums"
+              :class="plClass(b.profit)"
+            >
+              {{ signYuan(b.profit) }}
+              <span class="text-xs font-normal text-text-tertiary">费用 {{ yuan(b.fee) }}</span>
+            </p>
+            <p v-else class="font-mono text-sm text-text-tertiary">—</p>
+            <!-- 桶内成员明细（王总 2026-11-10 指定）：每票盈亏与费用，|盈亏| 降序，超高内滚 -->
+            <ul
+              v-if="stockBucketMembers[b.key]?.length"
+              class="mt-1 max-h-28 space-y-0.5 overflow-y-auto border-t border-flat-weak pt-1 text-xs"
+            >
+              <li
+                v-for="m in stockBucketMembers[b.key]"
+                :key="m.code"
+                class="flex items-baseline justify-between gap-2"
+              >
+                <span class="min-w-0 truncate text-text-secondary">
+                  {{ m.name }}
+                  <span class="ml-0.5 font-mono text-text-tertiary">{{ m.code }}</span>
+                  <span v-if="m.count > 1" class="text-text-tertiary">×{{ m.count }}</span>
+                </span>
+                <span class="shrink-0 font-mono tabular-nums">
+                  <span :class="plClass(m.profit)">{{ signYuan(m.profit) }}</span>
+                  <span class="text-text-tertiary">/ 费 {{ yuan(m.fee) }}</span>
+                </span>
+              </li>
+            </ul>
+          </button>
         </div>
+        <p v-if="activeBucket" class="text-xs text-primary">
+          已筛选「{{ holdBuckets.find((b) => b.key === activeBucket)?.label }}」桶明细（下方{{ stockView === 'summary' ? '分组' : '周期' }}表），再次点击该桶取消
+        </p>
       </div>
 
       <!-- 按个股汇总：点击分组展开该股全部周期明细（王总 2026-11-09 指定） -->
@@ -546,103 +878,269 @@ const fundColumns: TableColumn<TzzbHoldingReturn>[] = [
         </div>
       </template>
 
-      <!-- 周期明细（按周期平铺） -->
-      <BaseTable
-        v-else
-        :columns="stockColumns"
-        :rows="cleared"
-        :row-key="(r) => `${r.code}-${r.openDate}`"
-        :min-width="'780px'"
-        scroll-class="table-scroll-sm"
-        row-clickable
-        enable-dblclick-nav
-        footer-text="单击开侧栏 / 双击进详情"
-        @row-click="(r) => emit('open', r.code)"
-        @row-dblclick="(r) => emit('openPage', r.code)"
-      >
-        <template #name="{ row }">
-          <span class="font-medium text-text">{{ row.name }}</span>
-          <span class="ml-1 font-mono text-xs text-text-tertiary">{{ row.code }}</span>
-        </template>
-        <template #period="{ row }">
-          <span class="font-mono text-xs">
-            {{ row.openDate }} → <b v-if="row.closeDate" class="font-normal">{{ row.closeDate }}</b>
-            <b v-else class="text-primary">持有中</b>
-          </span>
-        </template>
-        <template #profit="{ row }">
-          <span class="font-mono font-medium tabular-nums" :class="plClass(row.profit)">
-            {{ signYuan(row.profit) }}
-          </span>
-        </template>
-        <template #rate="{ row }">
-          <span class="font-mono tabular-nums" :class="plClass(row.rate)">
-            {{ (row.rate * 100).toFixed(2) }}%
-          </span>
-        </template>
-        <template #feeRatio="{ row }">
-          <span class="font-mono tabular-nums">
-            {{ row.profit !== 0 ? `${((row.fee / Math.abs(row.profit)) * 100).toFixed(0)}%` : '—' }}
-          </span>
-        </template>
-      </BaseTable>
+      <!-- 周期明细（按周期平铺）：默认收起只露表头 + 3 行，chevron 展开 / 收起（对齐市场总览指数） -->
+      <template v-else>
+        <div class="row-clamp" :style="recordsClampStyle">
+          <div :ref="setRecordsRef">
+            <BaseTable
+              :columns="stockColumns"
+              :rows="filteredCycles"
+              :row-key="(r) => `${r.code}-${r.openDate}`"
+              :min-width="'780px'"
+              scroll-class="table-scroll-sm"
+              row-clickable
+              enable-dblclick-nav
+              footer-text="单击开侧栏 / 双击进详情"
+              @row-click="(r) => emit('open', r.code)"
+              @row-dblclick="(r) => emit('openPage', r.code)"
+            >
+              <template #name="{ row }">
+                <span class="font-medium text-text">{{ row.name }}</span>
+                <span class="ml-1 font-mono text-xs text-text-tertiary">{{ row.code }}</span>
+              </template>
+              <template #period="{ row }">
+                <span class="font-mono text-xs">
+                  {{ row.openDate }} → <b v-if="row.closeDate" class="font-normal">{{ row.closeDate }}</b>
+                  <b v-else class="text-primary">持有中</b>
+                </span>
+              </template>
+              <template #profit="{ row }">
+                <span class="font-mono font-medium tabular-nums" :class="plClass(row.profit)">
+                  {{ signYuan(row.profit) }}
+                </span>
+              </template>
+              <template #rate="{ row }">
+                <span class="font-mono tabular-nums" :class="plClass(row.rate)">
+                  {{ (row.rate * 100).toFixed(2) }}%
+                </span>
+              </template>
+              <template #feeRatio="{ row }">
+                <span class="font-mono tabular-nums">
+                  {{ row.profit !== 0 ? `${((row.fee / Math.abs(row.profit)) * 100).toFixed(0)}%` : '—' }}
+                </span>
+              </template>
+            </BaseTable>
+          </div>
+        </div>
+        <div v-if="recordsHasOverflow" class="-mt-1.5 flex justify-center">
+          <button
+            type="button"
+            class="pressable rounded-full p-1.5 text-text-tertiary hover:bg-flat-weak hover:text-text active:scale-90"
+            :aria-expanded="recordsExpanded"
+            aria-label="清仓记录"
+            :title="recordsExpanded ? '收起清仓记录' : '展开全部清仓记录'"
+            @click="toggleRecordsExpanded"
+          >
+            <MenuIcon
+              name="chevronDown"
+              :size="16"
+              class="transition-transform"
+              :class="recordsExpanded ? 'rotate-180' : ''"
+            />
+          </button>
+        </div>
+      </template>
     </template>
 
-    <!-- 个基：汇总条 + 累计收益明细 -->
+    <!-- 个基：持有周期（长短线分桶 + 申赎回合）/ 累计收益（原口径） -->
     <template v-else>
-      <div v-if="fundSummary" class="grid grid-cols-2 gap-2 md:grid-cols-4">
-        <div class="rounded-lg bg-flat-weak/60 px-3 py-2">
-          <p class="text-xs text-text-tertiary">累计盈亏（{{ fundSummary.count }} 只）</p>
-          <p class="mt-0.5 font-mono text-base font-semibold tabular-nums" :class="plClass(fundSummary.totalProfit)">
-            {{ signYuan(fundSummary.totalProfit) }}
-          </p>
-        </div>
-        <div class="rounded-lg bg-flat-weak/60 px-3 py-2">
-          <p class="text-xs text-text-tertiary">盈利占比</p>
-          <p class="mt-0.5 font-mono text-base font-semibold tabular-nums text-text">
-            {{ (fundSummary.winRate * 100).toFixed(0) }}%
-          </p>
-        </div>
-        <div class="rounded-lg bg-flat-weak/60 px-3 py-2">
-          <p class="text-xs text-text-tertiary">最佳</p>
-          <p class="mt-0.5 truncate font-mono text-sm font-semibold tabular-nums" :class="plClass(fundSummary.best?.profit ?? 0)">
-            {{ fundSummary.best ? `${fundSummary.best.name} ${signYuan(fundSummary.best.profit)}` : '—' }}
-          </p>
-        </div>
-        <div class="rounded-lg bg-flat-weak/60 px-3 py-2">
-          <p class="text-xs text-text-tertiary">最差</p>
-          <p class="mt-0.5 truncate font-mono text-sm font-semibold tabular-nums" :class="plClass(fundSummary.worst?.profit ?? 0)">
-            {{ fundSummary.worst ? `${fundSummary.worst.name} ${signYuan(fundSummary.worst.profit)}` : '—' }}
-          </p>
-        </div>
-      </div>
+      <!-- 持有周期视图：本地由申赎流水重构「首笔申购 → 份额清零」回合（上游无基金清仓周期工具） -->
+      <template v-if="fundView === 'cycle'">
+        <BaseEmpty
+          v-if="fundCycles.length === 0"
+          text="暂无基金申赎流水：同步投资账本后自动重构持有回合"
+        />
+        <div v-else class="flex flex-col gap-3">
+          <!-- 长短线分桶（阈值见上方公共配置行；口径 = 回合持有天数，盈亏为现金流估算） -->
+          <div class="flex flex-col gap-1.5">
+            <div class="grid grid-cols-3 gap-2">
+              <button
+                v-for="b in fundBuckets"
+                :key="b.key"
+                type="button"
+                class="rounded-lg border px-3 py-2 text-left transition-colors"
+                :class="activeBucket === b.key ? 'border-primary bg-primary/5' : 'border-flat-weak hover:bg-flat-weak/40'"
+                :title="activeBucket === b.key ? '点击取消筛选' : '点击筛选该桶回合'"
+                @click="toggleBucket(b.key)"
+              >
+                <p class="text-xs text-text-secondary">
+                  {{ b.label }}
+                  <span class="text-text-tertiary">（{{ b.rangeLabel }}）</span>
+                </p>
+                <p class="mt-0.5 text-xs text-text-tertiary">
+                  {{ b.count }} 回合<template v-if="b.holding > 0">（持有中 {{ b.holding }}）</template>
+                  <template v-if="b.winRate !== null">· 胜率 {{ (b.winRate * 100).toFixed(0) }}%</template>
+                  <template v-if="b.avgHold !== null">· 均 {{ b.avgHold.toFixed(1) }} 天</template>
+                </p>
+                <p
+                  v-if="b.count > 0"
+                  class="font-mono text-sm font-semibold tabular-nums"
+                  :class="plClass(b.profit)"
+                >
+                  {{ signYuan(b.profit) }}
+                </p>
+                <p v-else class="font-mono text-sm text-text-tertiary">—</p>
+                <!-- 桶内成员明细：每基估算盈亏（现金流口径，无费用字段），|估算盈亏| 降序，超高内滚 -->
+                <ul
+                  v-if="fundBucketMembers[b.key]?.length"
+                  class="mt-1 max-h-28 space-y-0.5 overflow-y-auto border-t border-flat-weak pt-1 text-xs"
+                >
+                  <li
+                    v-for="m in fundBucketMembers[b.key]"
+                    :key="m.code"
+                    class="flex items-baseline justify-between gap-2"
+                  >
+                    <span class="min-w-0 truncate text-text-secondary">
+                      {{ m.name }}
+                      <span class="ml-0.5 font-mono text-text-tertiary">{{ m.code }}</span>
+                      <span v-if="m.count > 1" class="text-text-tertiary">×{{ m.count }}</span>
+                    </span>
+                    <span class="shrink-0 font-mono tabular-nums" :class="plClass(m.profit)">
+                      {{ signYuan(m.profit) }}
+                    </span>
+                  </li>
+                </ul>
+              </button>
+            </div>
+            <p class="text-xs text-text-tertiary">
+              按申赎流水重构「首笔申购 → 份额清零」回合 · 估算盈亏 = 赎回 − 申购（现金流口径，分红再投会有偏差） · 点击桶筛选回合表
+            </p>
+          </div>
 
-      <BaseTable
-        :columns="fundColumns"
-        :rows="fundReturns"
-        :row-key="(r) => r.code"
-        :min-width="'560px'"
-        scroll-class="table-scroll-sm"
-        row-clickable
-        footer-text="点击行打开基金详情 · 费用字段内测接口未提供"
-        @row-click="(r) => emit('open', r.code)"
-      >
-        <template #name="{ row }">
-          <span class="font-medium text-text">{{ row.name }}</span>
-          <span class="ml-1 font-mono text-xs text-text-tertiary">{{ row.code }}</span>
-        </template>
-        <template #profit="{ row }">
-          <span class="font-mono font-medium tabular-nums" :class="plClass(row.profit)">
-            {{ signYuan(row.profit) }}
-          </span>
-        </template>
-        <template #rate="{ row }">
-          <span class="font-mono tabular-nums" :class="plClass(row.rate)">
-            {{ (row.rate * 100).toFixed(2) }}%
-          </span>
-        </template>
-        <template #fee> <span class="text-text-tertiary">—</span> </template>
-      </BaseTable>
+          <!-- 回合明细：默认收起只露表头 + 3 行，chevron 展开 / 收起 -->
+          <div class="row-clamp" :style="recordsClampStyle">
+            <div :ref="setRecordsRef">
+              <BaseTable
+                :columns="fundCycleColumns"
+                :rows="filteredFundCycles"
+                :row-key="(r) => `${r.code}-${r.openDate}`"
+                :min-width="'640px'"
+                scroll-class="table-scroll-sm"
+                row-clickable
+                footer-text="点击行打开基金详情 · 持有中回合的估算盈亏为截至当前现金流差"
+                @row-click="(r) => emit('open', r.code)"
+              >
+                <template #name="{ row }">
+                  <span class="font-medium text-text">{{ row.name }}</span>
+                  <span class="ml-1 font-mono text-xs text-text-tertiary">{{ row.code }}</span>
+                </template>
+                <template #period="{ row }">
+                  <span class="font-mono text-xs">
+                    {{ row.openDate }} → <b v-if="row.closeDate" class="font-normal">{{ row.closeDate }}</b>
+                    <b v-else class="text-primary">持有中</b>
+                  </span>
+                </template>
+                <template #buyAmount="{ row }">
+                  <span class="font-mono tabular-nums">{{ yuan(row.buyAmount) }}</span>
+                </template>
+                <template #sellAmount="{ row }">
+                  <span class="font-mono tabular-nums">{{ yuan(row.sellAmount) }}</span>
+                </template>
+                <template #estProfit="{ row }">
+                  <span class="font-mono font-medium tabular-nums" :class="plClass(row.estProfit)">
+                    {{ signYuan(row.estProfit) }}
+                  </span>
+                </template>
+              </BaseTable>
+            </div>
+          </div>
+          <div v-if="recordsHasOverflow" class="-mt-1.5 flex justify-center">
+            <button
+              type="button"
+              class="pressable rounded-full p-1.5 text-text-tertiary hover:bg-flat-weak hover:text-text active:scale-90"
+              :aria-expanded="recordsExpanded"
+              aria-label="基金回合记录"
+              :title="recordsExpanded ? '收起回合记录' : '展开全部回合记录'"
+              @click="toggleRecordsExpanded"
+            >
+              <MenuIcon
+                name="chevronDown"
+                :size="16"
+                class="transition-transform"
+                :class="recordsExpanded ? 'rotate-180' : ''"
+              />
+            </button>
+          </div>
+        </div>
+      </template>
+
+      <!-- 累计收益视图（queryFundHoldingReturns 原口径） -->
+      <template v-else>
+        <div v-if="fundSummary" class="grid grid-cols-2 gap-2 md:grid-cols-4">
+          <div class="rounded-lg bg-flat-weak/60 px-3 py-2">
+            <p class="text-xs text-text-tertiary">累计盈亏（{{ fundSummary.count }} 只）</p>
+            <p class="mt-0.5 font-mono text-base font-semibold tabular-nums" :class="plClass(fundSummary.totalProfit)">
+              {{ signYuan(fundSummary.totalProfit) }}
+            </p>
+          </div>
+          <div class="rounded-lg bg-flat-weak/60 px-3 py-2">
+            <p class="text-xs text-text-tertiary">盈利占比</p>
+            <p class="mt-0.5 font-mono text-base font-semibold tabular-nums text-text">
+              {{ (fundSummary.winRate * 100).toFixed(0) }}%
+            </p>
+          </div>
+          <div class="rounded-lg bg-flat-weak/60 px-3 py-2">
+            <p class="text-xs text-text-tertiary">最佳</p>
+            <p class="mt-0.5 truncate font-mono text-sm font-semibold tabular-nums" :class="plClass(fundSummary.best?.profit ?? 0)">
+              {{ fundSummary.best ? `${fundSummary.best.name} ${signYuan(fundSummary.best.profit)}` : '—' }}
+            </p>
+          </div>
+          <div class="rounded-lg bg-flat-weak/60 px-3 py-2">
+            <p class="text-xs text-text-tertiary">最差</p>
+            <p class="mt-0.5 truncate font-mono text-sm font-semibold tabular-nums" :class="plClass(fundSummary.worst?.profit ?? 0)">
+              {{ fundSummary.worst ? `${fundSummary.worst.name} ${signYuan(fundSummary.worst.profit)}` : '—' }}
+            </p>
+          </div>
+        </div>
+
+        <div class="row-clamp" :style="recordsClampStyle">
+          <div :ref="setRecordsRef">
+            <BaseTable
+              :columns="fundColumns"
+              :rows="fundReturns"
+              :row-key="(r) => r.code"
+              :min-width="'560px'"
+              scroll-class="table-scroll-sm"
+              row-clickable
+              footer-text="点击行打开基金详情 · 费用字段内测接口未提供"
+              @row-click="(r) => emit('open', r.code)"
+            >
+              <template #name="{ row }">
+                <span class="font-medium text-text">{{ row.name }}</span>
+                <span class="ml-1 font-mono text-xs text-text-tertiary">{{ row.code }}</span>
+              </template>
+              <template #profit="{ row }">
+                <span class="font-mono font-medium tabular-nums" :class="plClass(row.profit)">
+                  {{ signYuan(row.profit) }}
+                </span>
+              </template>
+              <template #rate="{ row }">
+                <span class="font-mono tabular-nums" :class="plClass(row.rate)">
+                  {{ (row.rate * 100).toFixed(2) }}%
+                </span>
+              </template>
+              <template #fee> <span class="text-text-tertiary">—</span> </template>
+            </BaseTable>
+          </div>
+        </div>
+        <div v-if="recordsHasOverflow" class="-mt-1.5 flex justify-center">
+          <button
+            type="button"
+            class="pressable rounded-full p-1.5 text-text-tertiary hover:bg-flat-weak hover:text-text active:scale-90"
+            :aria-expanded="recordsExpanded"
+            aria-label="清仓记录"
+            :title="recordsExpanded ? '收起清仓记录' : '展开全部清仓记录'"
+            @click="toggleRecordsExpanded"
+          >
+            <MenuIcon
+              name="chevronDown"
+              :size="16"
+              class="transition-transform"
+              :class="recordsExpanded ? 'rotate-180' : ''"
+            />
+          </button>
+        </div>
+      </template>
     </template>
   </div>
 </template>
