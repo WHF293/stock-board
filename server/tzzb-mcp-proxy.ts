@@ -585,7 +585,7 @@ const createTzzbMcpMiddleware =
         const headers: Record<string, string> = {
           'Content-Type': 'application/json',
           Accept: 'application/json, text/event-stream',
-          // 上游 WAF（hexin-waf）对非浏览器 UA 敏感，固定伪装成真实浏览器特征
+          // 上游 WAF 对非浏览器 UA 敏感，固定伪装成真实浏览器特征
           'User-Agent': UPSTREAM_USER_AGENT,
           'Accept-Language': 'zh-CN,zh;q=0.9',
         };

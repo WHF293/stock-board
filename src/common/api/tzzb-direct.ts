@@ -90,7 +90,7 @@ const tokenEndpoint = (): string => `${upstreamOrigin}/oauth2/token`;
  * 带默认头的 tauriFetch（UA 指纹统一）
  *
  * **Origin: '' 必传**：tauri-plugin-http 默认会自动附加 webview 来源
- * `Origin: http://tauri.localhost`（Windows），上游 hexin-waf / OAuth 服务的
+ * `Origin: http://tauri.localhost`（Windows），上游 WAF / OAuth 服务的
  * CORS 白名单不认它，POST oauth2/* 一律 403 "Invalid CORS request"（纯文本体，
  * 表现为「注册失败: {}」——2026-11-10 打包版授权失败根因）。插件在
  * unsafe-headers feature 下收到空 Origin 会显式删除该头（commands.rs L305-309），
