@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { nextTick, ref, watch } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 import { useRoute } from 'vue-router';
+import { pluginKernel } from '../common/plugin';
 import { useDocumentThemeSync } from '../common/composables/use-document-theme';
 import { initBoardCalendarSync } from '../common/composables/use-board-calendar-sync';
 import MobileTabBar from './components/MobileTabBar.vue';
@@ -48,6 +49,14 @@ const animOrderOf = (path: string): number => {
   return index >= 0 ? index : MOBILE_TAB_PATHS.length;
 };
 
+/**
+ * 插件内核 revision（挂载 / 升级 / 卸载时自增），拼进页面 keep-alive 的 key。
+ * 与 PC MainLayout 对齐：插件覆盖安装 / 卸载重装后同路径页面强制重建实例，
+ * 否则 keep-alive 按 path 命中旧实例，升级后页面一直渲染旧代码
+ * （2026-11-10 历史牛熊 1.3.0 实测踩坑，PC 侧同日修复）。
+ */
+const pluginKernelRevision = computed(() => pluginKernel.revision.value);
+
 watch(
   () => route.path,
   (to, from) => {
@@ -65,13 +74,18 @@ watch(
 
 <template>
   <div class="m-root">
-    <!-- keep-alive + 按路径键控（对齐 PC MainLayout）：
+    <!-- keep-alive + 「路径#插件内核 revision」键控：
          缓存按完整路径区分，/stock/:code、/rank/:rank 这类同组件带参路由
          各自独立实例，回退恢复原页状态；隐藏页轮询经 onDeactivated 停止
-         （use-mobile-polling 已内置）；进入动画由 pageAnim 类名驱动 -->
+         （use-mobile-polling 已内置）；进入动画由 pageAnim 类名驱动。
+         key 拼 revision：插件升级 / 重装后同路径页面强制重建实例（对齐 PC MainLayout） -->
     <router-view v-slot="{ Component, route: routeRecord }">
       <keep-alive>
-        <component :is="Component" :key="routeRecord.path" :class="pageAnim" />
+        <component
+          :is="Component"
+          :key="`${routeRecord.path}#${pluginKernelRevision}`"
+          :class="pageAnim"
+        />
       </keep-alive>
     </router-view>
     <MobileTabBar />
