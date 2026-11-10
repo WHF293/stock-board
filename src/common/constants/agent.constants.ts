@@ -3,7 +3,7 @@
  *
  * 禁 enum：状态/枚举一律 `as const` + satisfies。
  */
-import type { ModelPresetKey } from '@/common/types/agent.types';
+import type { ComposerResourceKind, ModelPresetKey } from '@/common/types/agent.types';
 
 /** agent 数据库连接串（独立分库，与交割单 stock-board.db 互不干扰） */
 export const AGENT_DB_URL = 'sqlite:agent.db';
@@ -98,6 +98,110 @@ export const AGENT_MANAGER_ENTRIES = [
   label: string;
   icon: string;
 }>;
+
+/** 输入框斜杠命令定义（/ 唤起的候补行） */
+export interface SlashCommandDef {
+  /** 命令资源类别（model 是特例：选择即切换模型；compact 是特例：立即执行压缩，无二级列表） */
+  key: ComposerResourceKind | 'model' | 'compact';
+  /** 命令字面量（含斜杠，如 /skills；也是输入过滤的匹配串） */
+  command: string;
+  /** 根级展示标题 */
+  title: string;
+  /** 根级说明文案 */
+  description: string;
+  /** MenuIcon 图标 key */
+  icon: string;
+  /** 二级选项列表标题（compact 立即执行无二级列表，可省略） */
+  optionTitle?: string;
+  /** 二级空列表文案 */
+  emptyText?: string;
+}
+
+/** 输入框斜杠命令（/ 唤起；行为与 + 菜单一致，见 ChatPanel 的 slash 装配） */
+export const SLASH_COMMANDS = [
+  {
+    key: 'skill',
+    command: '/skills',
+    title: '技能',
+    description: '强制包含技能（对话级）',
+    icon: 'book',
+    optionTitle: '选择技能',
+    emptyText: '暂无启用的技能',
+  },
+  {
+    key: 'mcp',
+    command: '/mcp',
+    title: 'MCP',
+    description: '强制并入 MCP 工具（对话级）',
+    icon: 'plug',
+    optionTitle: '选择 MCP',
+    emptyText: '暂无启用的 MCP',
+  },
+  {
+    key: 'subagent',
+    command: '/subagent',
+    title: '子代理',
+    description: '追加参与编排的子代理',
+    icon: 'agent',
+    optionTitle: '选择子代理',
+    emptyText: '暂无启用的子代理',
+  },
+  {
+    key: 'model',
+    command: '/model',
+    title: '模型',
+    description: '切换本次对话使用的模型',
+    icon: 'cpu',
+    optionTitle: '切换模型',
+    emptyText: '尚未配置模型，请先在 Model 管理中添加',
+  },
+  {
+    key: 'compact',
+    command: '/compact',
+    title: '压缩上下文',
+    description: '把会话历史压缩成摘要，释放上下文空间',
+    icon: 'cpu',
+  },
+] as const satisfies ReadonlyArray<SlashCommandDef>;
+
+/** 消息气泡里资源引用标签的图标映射（kind → MenuIcon key） */
+export const RESOURCE_REF_ICONS: Record<ComposerResourceKind, string> = {
+  skill: 'book',
+  mcp: 'plug',
+  subagent: 'agent',
+};
+
+/**
+ * 上下文压缩摘要的系统提示词（/compact 用；独立于主 agent 提示词）
+ *
+ * 摘要是后续对话恢复上下文的唯一依据，硬性要求保留数字 / 代码 / 时点等
+ * 具体信息，防止压缩一轮后关键事实丢失。
+ */
+export const COMPACT_SYSTEM_PROMPT = `# 角色
+你是「对话压缩器」。你的唯一任务是把一段多轮对话压缩成一份结构化摘要，供后续对话以最小篇幅恢复等价上下文。你不是对话参与者：不回答对话里的问题、不补充对话中不存在的信息、不发表自己的观点。
+
+# 输出结构（Markdown，四个小节）
+## 背景
+会话主题、涉及标的（代码）与时间范围，一段话概括。
+## 关键结论
+对话中已确认的事实、数据与结论逐条列出；数字带数据时点；结论冲突时并列并注明分歧点。
+## 用户意图与约束
+用户明确表达的目标、偏好与约束（如关注范围、输出要求）。
+## 待续事项
+尚未完成的分析、已提出未回答的问题、下一步动作。
+
+# 硬性要求
+- 只输出摘要本体，不要开场白、解释或对用户的称呼；
+- 保留具体数字、股票代码、日期与专有名词，不得泛化或省略；
+- 工具调用结果只保留对结论有支撑的关键数据；
+- 全文控制在 800 字以内。`;
+
+/** 上下文压缩的触发指令（作为最后一条用户消息发给压缩器） */
+export const COMPACT_INSTRUCTION = '请按系统要求把以上对话压缩为结构化摘要。';
+
+/** 压缩摘要注入历史时的前缀（摘要以首条 user 消息形态重建上下文，对齐 Claude Code 做法） */
+export const COMPACT_HISTORY_PREFIX =
+  '【历史摘要】以下是本会话此前对话的压缩摘要，其后是摘要产生后的新消息。\n';
 
 /** 欢迎态快捷场景 chips（点击预填输入） */
 export const WELCOME_SCENES = [

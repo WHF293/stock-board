@@ -10,7 +10,13 @@ import {
   CHAT_IMAGE_MAX_COUNT,
   CHAT_IMAGE_HISTORY_CARRY,
   SESSION_DEFAULT_TITLE,
+  SLASH_COMMANDS,
+  RESOURCE_REF_ICONS,
+  COMPACT_SYSTEM_PROMPT,
+  COMPACT_INSTRUCTION,
+  COMPACT_HISTORY_PREFIX,
 } from '@/common/constants/agent.constants';
+import type { SlashCommandDef } from '@/common/constants/agent.constants';
 import { listMessages, insertMessage, updateMessage, insertUsage } from '@/common/composables/use-agent-db';
 import { resolveAgentSystemPrompt } from '@/common/utils/agent-prompt';
 import { copyTextToClipboard } from '@/common/utils/copy-text-to-clipboard';
@@ -26,19 +32,26 @@ import { compressImageToDataUrl } from '@/common/utils/compress-image-to-data-ur
 import { formatDurationMs } from '@/common/utils/format-duration-ms';
 import { upsertToolPart } from '@/common/utils/upsert-tool-part';
 import { guardUiPayload } from '@/common/utils/guard-ui-payload';
-import type { ChatMessage, MessageStatus, SubagentDef, ToolCallPart } from '@/common/types/agent.types';
 import type {
   AgentManagerKey,
+  ChatMessage,
+  CompactPart,
   ComposerResourceKind,
   ComposerResourceOption,
   ImagePart,
+  MessagePart,
+  MessageStatus,
   ModelConfig,
+  ResourceRefPart,
+  SubagentDef,
+  ToolCallPart,
 } from '@/common/types/agent.types';
 import MenuIcon from '@/pc/components/ui/MenuIcon.vue';
 import ToolCallCard from './ToolCallCard.vue';
 import MarkdownContent from './MarkdownContent.vue';
 import ComposerModelMenu from './ComposerModelMenu.vue';
 import ComposerResourceMenu from './ComposerResourceMenu.vue';
+import ComposerSlashMenu, { type SlashMenuRow } from './ComposerSlashMenu.vue';
 
 /**
  * Agent 聊天区（方案 §6.2 / §5.3.1）
@@ -207,6 +220,206 @@ const toggleSelection = (kind: ComposerResourceKind, id: number): void => {
     : [...selectedSubagentIds.value, id];
 };
 
+/* ------------------------------- 斜杠命令（/ 唤起） ------------------------------ */
+
+/**
+ * 输入框斜杠命令：键入 `/`（整段草稿仅为此形态）唤起命令候补，方向键 + Enter
+ * 或点击选择。`/skills` `/mcp` `/subagent` 进入对应类别的勾选列表（与 + 菜单
+ * 同一套对话级强制包含，勾选不收起可连续多选）；`/model` 直接切换会话模型。
+ */
+
+/** 斜杠弹层阶段：commands = 命令候补；options = 某类别的选项列表 */
+type SlashStage = 'commands' | 'options';
+
+/** 斜杠弹层是否打开 */
+const slashOpen = ref(false);
+/** 当前阶段 */
+const slashStage = ref<SlashStage>('commands');
+/** options 阶段对应的命令 key（commands 阶段无意义） */
+const slashKind = ref<ComposerResourceKind | 'model'>('skill');
+/** commands 阶段的过滤词（不含斜杠，随输入实时更新） */
+const slashQuery = ref('');
+/** 键盘 / 悬停高亮的行下标 */
+const slashActive = ref(0);
+
+/** 关闭斜杠弹层并复位状态 */
+const closeSlash = (): void => {
+  slashOpen.value = false;
+  slashStage.value = 'commands';
+  slashKind.value = 'skill';
+  slashQuery.value = '';
+  slashActive.value = 0;
+};
+
+/** 命令阶段候补行：按已键入的过滤词前缀匹配（/sk → /skills） */
+const slashCommandRows = computed<SlashMenuRow[]>(() => {
+  const query = slashQuery.value.toLowerCase();
+  return SLASH_COMMANDS.filter((cmd) => cmd.command.slice(1).startsWith(query)).map((cmd) => ({
+    id: cmd.command,
+    label: cmd.command,
+    description: cmd.description,
+    icon: cmd.icon,
+    checked: false,
+  }));
+});
+
+/** options 阶段行：技能 / MCP / 子代理 = 勾选列表（与 + 菜单同源）；模型 = 启用模型 */
+const slashOptionRows = computed<SlashMenuRow[]>(() => {
+  if (slashKind.value === 'skill') {
+    return skillOptions.value.map((option) => ({
+      id: String(option.id),
+      label: option.name,
+      description: option.description,
+      icon: 'book',
+      checked: selectedSkillIds.value.includes(option.id),
+    }));
+  }
+  if (slashKind.value === 'mcp') {
+    return mcpOptions.value.map((option) => ({
+      id: String(option.id),
+      label: option.name,
+      description: option.description,
+      icon: 'plug',
+      checked: selectedMcpIds.value.includes(option.id),
+    }));
+  }
+  if (slashKind.value === 'subagent') {
+    return subagentOptions.value.map((option) => ({
+      id: String(option.id),
+      label: option.name,
+      description: option.description,
+      icon: 'agent',
+      checked: selectedSubagentIds.value.includes(option.id),
+    }));
+  }
+  return store.enabledModels.map((model) => ({
+    id: String(model.id),
+    label: model.name,
+    description: model.modelId,
+    icon: 'cpu',
+    checked: currentModel.value?.id === model.id,
+    ...(model.isDefault ? { badge: '默认' } : {}),
+  }));
+});
+
+/** 当前阶段渲染行 */
+const slashRows = computed<SlashMenuRow[]>(() =>
+  slashStage.value === 'commands' ? slashCommandRows.value : slashOptionRows.value,
+);
+
+/** 弹层标题（命令阶段固定；选项阶段取命令定义的 optionTitle） */
+const slashHeading = computed<string>(() => {
+  if (slashStage.value === 'commands') return '斜杠命令';
+  const cmd: SlashCommandDef | undefined = SLASH_COMMANDS.find(
+    (item) => item.key === slashKind.value,
+  );
+  return cmd?.optionTitle ?? '';
+});
+
+/** 无候补时的空态文案 */
+const slashEmptyText = computed<string>(() => {
+  if (slashStage.value === 'commands') return '无匹配命令';
+  const cmd: SlashCommandDef | undefined = SLASH_COMMANDS.find(
+    (item) => item.key === slashKind.value,
+  );
+  return cmd?.emptyText ?? '暂无可选项';
+});
+
+/**
+ * 激活当前高亮行：命令阶段进入选项列表（清掉 /xxx 草稿）；选项阶段按类别
+ * 勾选资源（不收起，可连续多选）或切换模型（选中即收起）
+ */
+const activateSlash = (): void => {
+  const row = slashRows.value[slashActive.value];
+  if (!row) return;
+  if (slashStage.value === 'commands') {
+    const cmd: SlashCommandDef | undefined = SLASH_COMMANDS.find(
+      (item) => item.command === row.id,
+    );
+    if (!cmd) return;
+    // compact 是立即执行型命令：清掉 /compact 草稿后直接压缩
+    if (cmd.key === 'compact') {
+      draft.value = '';
+      closeSlash();
+      void runCompact();
+      return;
+    }
+    slashStage.value = 'options';
+    slashKind.value = cmd.key;
+    slashActive.value = 0;
+    // 清掉 /xxx 草稿；draft watch 的 options 分支对空串不收起，弹层保持打开
+    draft.value = '';
+    return;
+  }
+  if (slashKind.value === 'model') {
+    void store.setSessionModel(Number(row.id));
+    closeSlash();
+    return;
+  }
+  toggleSelection(slashKind.value, Number(row.id));
+};
+
+/**
+ * 点击选择某行（与键盘激活同路径）
+ * @param id 行 id（命令字面量或 String(资源 id)）
+ */
+const onSlashSelect = (id: string): void => {
+  const index = slashRows.value.findIndex((row) => row.id === id);
+  if (index < 0) return;
+  slashActive.value = index;
+  activateSlash();
+};
+
+// 草稿变化驱动弹层：commands 阶段整段是 /xxx 形态才打开并更新过滤词；
+// options 阶段一旦开始输入正文即收起（勾选不改草稿，弹层保持）
+watch(draft, (value) => {
+  if (slashStage.value === 'options') {
+    if (value !== '') closeSlash();
+    return;
+  }
+  const match = /^\/[a-z\d_-]*$/i.exec(value);
+  if (match) {
+    slashOpen.value = true;
+    slashQuery.value = value.slice(1);
+    slashActive.value = 0;
+  } else if (slashOpen.value) {
+    closeSlash();
+  }
+});
+
+/**
+ * 输入框键盘处理：斜杠弹层打开时接管方向键 / Enter / Tab / Esc；
+ * 否则 Enter 发送（Shift+Enter 换行；IME 组合中不拦截）
+ * @param event 键盘事件
+ */
+const onKeydown = (event: KeyboardEvent): void => {
+  if (event.isComposing) return;
+  if (event.key === 'Enter' && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
+    event.preventDefault();
+    if (slashOpen.value) activateSlash();
+    else void send();
+    return;
+  }
+  if (!slashOpen.value) return;
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    closeSlash();
+    return;
+  }
+  const count = slashRows.value.length;
+  if (count === 0) return;
+  if (event.key === 'ArrowDown') {
+    event.preventDefault();
+    slashActive.value = (slashActive.value + 1) % count;
+  } else if (event.key === 'ArrowUp') {
+    event.preventDefault();
+    slashActive.value = (slashActive.value - 1 + count) % count;
+  } else if (event.key === 'Tab') {
+    event.preventDefault();
+    activateSlash();
+  }
+};
+
 /**
  * 模型下拉选择：有会话 = 绑定会话；无会话 = 设为默认模型（语义见 store.setSessionModel）
  * @param model 选中的模型
@@ -235,6 +448,24 @@ const userImages = (msg: ChatMessage): string[] =>
   (msg.parts ?? [])
     .filter((part): part is ImagePart => part.type === 'image')
     .map((part) => part.dataUrl);
+
+/**
+ * 取消息里携带的资源引用标签（用户气泡渲染；发送时的对话级强制包含快照）
+ * @param msg 消息
+ * @returns 资源引用列表（kind + 展示名）
+ */
+const msgRefs = (msg: ChatMessage): ResourceRefPart['items'] =>
+  (msg.parts ?? [])
+    .filter((part): part is ResourceRefPart => part.type === 'resource_refs')
+    .flatMap((part) => part.items);
+
+/**
+ * 消息是否为上下文压缩摘要（compact_summary 标记；仅 status=done 的算有效压缩点）
+ * @param msg 消息
+ * @returns 是否携带压缩标记
+ */
+const isCompact = (msg: ChatMessage): boolean =>
+  (msg.parts ?? []).some((part) => part.type === 'compact_summary');
 
 /**
  * 追加待发附图（粘贴 / 拖拽 / 文件选择三入口共用）
@@ -475,6 +706,104 @@ const finalizeRun = (run: ActiveRun): void => {
   activeRuns.value = activeRuns.value.filter((r) => r !== run);
 };
 
+/* ------------------------------ 上下文压缩（/compact） ----------------------------- */
+
+/**
+ * 压缩当前会话上下文：把会话历史交给当前模型生成结构化摘要，以带
+ * compact_summary 标记的助手消息落库。此后每次运行只携带「摘要 +
+ * 摘要之后的消息」，长会话不再线性膨胀（见 send() 的压缩点裁剪）。
+ *
+ * 复用 ActiveRun 管线：占位消息流式出摘要、ticker 消费平滑缓冲、
+ * finalizeRun 统一终态落库；出错 / 中止的摘要不带有效压缩点（历史不裁）。
+ */
+const runCompact = async (): Promise<void> => {
+  const sessionId = store.currentSessionId;
+  const model = currentModel.value;
+  if (sessionId === null) {
+    sendHint.value = '当前没有会话，无需压缩';
+    return;
+  }
+  if (!model) {
+    sendHint.value = '尚未配置模型，无法压缩上下文';
+    return;
+  }
+  if (isRunning.value) {
+    sendHint.value = '当前会话有任务运行中，请等待结束后再压缩';
+    return;
+  }
+  const list = messagesBySession[sessionId];
+  if (!list || list.length === 0) {
+    sendHint.value = '会话还没有消息，无需压缩';
+    return;
+  }
+  // 文本全量进压缩（附图不入：图片按原样计 token，压缩本身就是为了省空间）
+  const done = list.filter((m) => m.status === 'done' || m.status === 'stopped');
+  if (done.length === 0) {
+    sendHint.value = '会话还没有已完成的消息，无需压缩';
+    return;
+  }
+  sendHint.value = '';
+  const textHistory: HistoryMessage[] = done.map((m) => ({
+    role: m.role === 'user' ? 'user' : 'assistant',
+    content: m.content,
+  }));
+
+  // 摘要消息占位（带 compact_summary 标记，流式填充摘要正文；finalizeRun 落库）
+  const compactPart: CompactPart = { type: 'compact_summary' };
+  const compactMsg: ChatMessage = {
+    id: await insertMessage({
+      sessionId,
+      role: 'assistant',
+      content: '',
+      parts: [compactPart],
+      status: 'running',
+    }),
+    sessionId,
+    role: 'assistant',
+    content: '',
+    parts: [compactPart],
+    status: 'running',
+    error: null,
+    createdAt: Date.now(),
+  };
+  list.push(compactMsg);
+  // 与 send() 同款：必须经代理数组取回消息引用，直写原始对象不触发响应式
+  const liveMsg = list[list.length - 1]!;
+  autoscroll();
+  const streamer = new SmoothStreamer((out) => {
+    liveMsg.content += out;
+  });
+  const run: ActiveRun = {
+    sessionId,
+    messageId: compactMsg.id,
+    streamer,
+    startedAt: Date.now(),
+    finalText: null,
+    stopped: false,
+    error: null,
+    handle: startAgentRun(
+      {
+        model,
+        systemPrompt: COMPACT_SYSTEM_PROMPT,
+        history: textHistory,
+        message: COMPACT_INSTRUCTION,
+        subagents: [],
+      },
+      {
+        onDelta: (delta) => streamer.push(delta),
+        onDone: (full, stopped) => {
+          run.finalText = full;
+          run.stopped = stopped;
+        },
+        onError: (message) => {
+          run.error = message;
+        },
+      },
+    ),
+  };
+  activeRuns.value.push(run);
+};
+
 /**
  * 发送消息（文本与附图至少其一；纯图消息文本可为空）
  */
@@ -496,11 +825,33 @@ const send = async (): Promise<void> => {
     return;
   }
   sendHint.value = '';
+  closeSlash();
 
-  // 对话级强制包含快照：无会话时发送会新建会话（触发切换 watch 清空选择），先取值再动会话
+  // 对话级强制包含快照：先取值再清空（快照跟随本次消息；发送即消费，
+  // 不留到下一轮——无论同会话直发还是无会话新建，输入框 chips 都应清空）
   const forcedSkillIds = [...selectedSkillIds.value];
   const forcedMcpIds = [...selectedMcpIds.value];
   const forcedSubagentIds = [...selectedSubagentIds.value];
+  selectedSkillIds.value = [];
+  selectedMcpIds.value = [];
+  selectedSubagentIds.value = [];
+
+  // 强制包含的资源名快照（气泡里渲染标签）：运行上下文装配时资源本身已生效，
+  // 这里只解决「选了但看不到」——消息可追溯本次带了哪些技能 / MCP / 子代理
+  const refItems: ResourceRefPart['items'] = [
+    ...forcedSkillIds.flatMap((id) => {
+      const option = skillOptions.value.find((item) => item.id === id);
+      return option ? [{ kind: 'skill' as const, name: option.name }] : [];
+    }),
+    ...forcedMcpIds.flatMap((id) => {
+      const option = mcpOptions.value.find((item) => item.id === id);
+      return option ? [{ kind: 'mcp' as const, name: option.name }] : [];
+    }),
+    ...forcedSubagentIds.flatMap((id) => {
+      const option = subagentOptions.value.find((item) => item.id === id);
+      return option ? [{ kind: 'subagent' as const, name: option.name }] : [];
+    }),
+  ];
 
   // 未建会话先建
   let sessionId = store.currentSessionId;
@@ -513,9 +864,17 @@ const send = async (): Promise<void> => {
   const list = messagesBySession[sessionId] ?? reactive<ChatMessage[]>([]);
   messagesBySession[sessionId] = list;
 
-  // 用户消息落库 + 上屏（附图在 parts 里，content 只存文本；纯图消息 content 为空串）
+  // 用户消息落库 + 上屏（parts = 附图 + 资源引用标签；content 只存文本）
   const userContent = text;
   const imageParts: ImagePart[] = images.map((dataUrl) => ({ type: 'image', dataUrl }));
+  const resourceRefsPart: ResourceRefPart | null =
+    refItems.length > 0 ? { type: 'resource_refs', items: refItems } : null;
+  const messageParts: MessagePart[] | null =
+    resourceRefsPart !== null
+      ? [...imageParts, resourceRefsPart]
+      : imageParts.length > 0
+        ? imageParts
+        : null;
   draft.value = '';
   pendingImages.value = [];
   const userMsg: ChatMessage = {
@@ -523,12 +882,12 @@ const send = async (): Promise<void> => {
       sessionId,
       role: 'user',
       content: userContent,
-      parts: imageParts.length > 0 ? imageParts : null,
+      parts: messageParts,
     }),
     sessionId,
     role: 'user',
     content: userContent,
-    parts: imageParts.length > 0 ? imageParts : null,
+    parts: messageParts,
     status: 'done',
     error: null,
     createdAt: Date.now(),
@@ -561,19 +920,36 @@ const send = async (): Promise<void> => {
   const liveMsg = list[list.length - 1]!;
   autoscroll();
 
-  // 历史窗口（最近 30 条已完成消息，排除本次；附图只随最近 N 条用户消息携带，
-  // 图片块按原样计 token，全量带图极易超上下文——见 CHAT_IMAGE_HISTORY_CARRY）
-  const recent = list
-    .filter((m) => m.id !== assistantMsg.id && (m.status === 'done' || m.status === 'stopped'))
-    .slice(-30);
+  // 历史窗口：压缩点裁剪 + 最近 30 条已完成消息（均排除本次占位）
+  // - 压缩点 = 最后一条 status=done 的 compact_summary 消息；其之前的原始消息
+  //   不再进历史，由摘要本体以首条 user 消息形态重建上下文（对齐 Claude Code）
+  // - 附图只随最近 N 条用户消息携带（图片块按原样计 token，全量带图极易超
+  //   上下文——见 CHAT_IMAGE_HISTORY_CARRY）
+  const done = list.filter(
+    (m) => m.id !== assistantMsg.id && (m.status === 'done' || m.status === 'stopped'),
+  );
+  let compactIndex = -1;
+  for (let i = done.length - 1; i >= 0; i -= 1) {
+    if (done[i]!.status === 'done' && isCompact(done[i]!)) {
+      compactIndex = i;
+      break;
+    }
+  }
+  const compactMsg = compactIndex >= 0 ? done[compactIndex] : null;
+  const recent = (compactIndex >= 0 ? done.slice(compactIndex + 1) : done).slice(-30);
   const imageCarryFrom = recent.length - CHAT_IMAGE_HISTORY_CARRY;
-  const history: HistoryMessage[] = recent.map((m, index) => ({
-    role: m.role === 'user' ? 'user' : 'assistant',
-    content: m.content,
-    ...(m.role === 'user' && index >= imageCarryFrom && userImages(m).length > 0
-      ? { images: userImages(m) }
-      : {}),
-  }));
+  const history: HistoryMessage[] = [
+    ...(compactMsg
+      ? [{ role: 'user' as const, content: COMPACT_HISTORY_PREFIX + compactMsg.content }]
+      : []),
+    ...recent.map((m, index) => ({
+      role: m.role === 'user' ? ('user' as const) : ('assistant' as const),
+      content: m.content,
+      ...(m.role === 'user' && index >= imageCarryFrom && userImages(m).length > 0
+        ? { images: userImages(m) }
+        : {}),
+    })),
+  ];
 
   const model = currentModel.value;
   const profile = currentProfile.value;
@@ -871,7 +1247,7 @@ const showWelcome = computed(() => messages.value.length === 0);
           {{
             store.models.length === 0
               ? '先在左侧 Model 中添加模型，即可开始对话'
-              : '输入问题开始对话，@ 可引用 Agent 配置'
+              : '输入问题开始对话，/ 可强制包含技能 / MCP / 子代理或切换模型'
           }}
         </p>
         <div class="mt-8 flex flex-wrap justify-center gap-2">
@@ -890,9 +1266,23 @@ const showWelcome = computed(() => messages.value.length === 0);
       <!-- 消息列表 -->
       <div v-else class="mx-auto max-w-3xl space-y-4 px-6 py-6">
         <div v-for="msg in messages" :key="msg.id" class="group">
-          <!-- 用户消息：右侧气泡（文本 + 附图；纯图消息无文本行） -->
+          <!-- 用户消息：右侧气泡（资源引用标签 + 附图 + 文本） -->
           <div v-if="msg.role === 'user'" class="flex justify-end">
             <div class="max-w-[85%] rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-sm text-on-primary">
+              <!-- 本次发送强制包含的资源标签（+ 菜单 / 斜杠命令勾选的快照） -->
+              <div
+                v-if="msgRefs(msg).length > 0"
+                class="mb-1.5 flex flex-wrap justify-end gap-1.5"
+              >
+                <span
+                  v-for="(item, refIndex) in msgRefs(msg)"
+                  :key="refIndex"
+                  class="flex items-center gap-1 rounded-full bg-white/15 px-2 py-0.5 text-[11px]"
+                >
+                  <MenuIcon :name="RESOURCE_REF_ICONS[item.kind]" :size="11" class="shrink-0" />
+                  <span class="max-w-[8rem] truncate">{{ item.name }}</span>
+                </span>
+              </div>
               <div
                 v-if="userImages(msg).length > 0"
                 class="mb-1.5 flex flex-wrap justify-end gap-1.5"
@@ -911,6 +1301,20 @@ const showWelcome = computed(() => messages.value.length === 0);
 
           <!-- 助手消息：通栏 -->
           <div v-else class="rounded-2xl bg-surface px-4 py-3">
+            <!-- 上下文压缩摘要标识（/compact 产物；此前的历史已被本摘要替换） -->
+            <div
+              v-if="isCompact(msg)"
+              class="mb-2 flex items-center gap-1.5 rounded-lg bg-flat-weak px-2.5 py-1.5 text-[11px] text-text-tertiary"
+            >
+              <MenuIcon name="cpu" :size="12" class="shrink-0" />
+              <span>
+                {{
+                  msg.status === 'running'
+                    ? '正在压缩上下文…'
+                    : '上下文已压缩——此前的历史已被本摘要替换，后续对话只携带摘要与其后的消息'
+                }}
+              </span>
+            </div>
             <!-- 工具调用卡（含 MCP Apps 沙箱渲染位），在正文上方按发生顺序排列 -->
             <div v-if="toolCards(msg).length > 0" class="mb-3 space-y-2">
               <p class="text-[11px] text-text-tertiary">工具调用 {{ toolCards(msg).length }} 次</p>
@@ -942,7 +1346,7 @@ const showWelcome = computed(() => messages.value.length === 0);
                 class="cursor-blink"
               />
             </div>
-            <!-- 错误卡 -->
+            <!-- 错误卡（压缩失败同样走这里；失败的摘要不作为压缩点裁剪历史） -->
             <div
               v-if="msg.status === 'error'"
               class="mt-2 rounded-lg bg-up-weak px-3 py-2 text-xs text-up"
@@ -1005,17 +1409,28 @@ const showWelcome = computed(() => messages.value.length === 0);
     <!-- 输入区（胶囊，悬浮于底部）：上行 textarea + 强制包含 chips，底栏 + / 模型 / 发送 -->
     <div class="mx-auto w-full max-w-3xl shrink-0 px-6 pb-4 pt-2">
       <div
-        class="rounded-3xl border border-flat-weak bg-surface px-4 py-3 shadow-sm transition-colors focus-within:border-primary"
+        class="relative rounded-3xl border border-flat-weak bg-surface px-4 py-3 shadow-sm transition-colors focus-within:border-primary"
         @dragover.prevent
         @drop.prevent="onDrop"
       >
+        <!-- 斜杠命令弹层（/ 唤起；键盘方向键 + Enter / 点击选择） -->
+        <ComposerSlashMenu
+          v-if="slashOpen"
+          :heading="slashHeading"
+          :rows="slashRows"
+          :active-index="slashActive"
+          :empty-text="slashEmptyText"
+          @select="onSlashSelect"
+          @hover="slashActive = $event"
+          @close="closeSlash"
+        />
         <textarea
           ref="inputRef"
           v-model="draft"
           :rows="CHAT_INPUT_MIN_ROWS"
           class="w-full resize-none bg-transparent text-sm leading-5 text-text outline-none placeholder:text-text-tertiary"
-          placeholder="输入问题，Enter 发送，Shift+Enter 换行，可粘贴 / 拖入图片"
-          @keydown.enter.exact.prevent="void send()"
+          placeholder="输入问题，/ 唤起技能 / MCP / 子代理 / 模型，Enter 发送，Shift+Enter 换行"
+          @keydown="onKeydown"
           @input="syncInputHeight"
           @paste="onPaste"
         />

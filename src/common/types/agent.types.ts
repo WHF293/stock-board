@@ -271,8 +271,31 @@ export interface ImagePart {
   dataUrl: string;
 }
 
+/**
+ * 消息里的结构化块：用户消息携带的对话级强制包含资源引用（发送时快照）
+ *
+ * 仅展示用（气泡里渲染资源标签），不参与历史重建喂给模型——资源本身在运行
+ * 上下文装配（run-context）时已生效，这里只是让用户能看到「这条消息带了什么」。
+ */
+export interface ResourceRefPart {
+  type: 'resource_refs';
+  /** 引用的资源列表（kind + 展示名；解析不到名字的资源不进快照） */
+  items: Array<{ kind: ComposerResourceKind; name: string }>;
+}
+
+/**
+ * 消息里的结构化块：上下文压缩摘要标记（/compact 产物）
+ *
+ * content 即摘要正文（Markdown）。带此标记的消息是**压缩点**：历史重建时
+ * 只取「最后一条已完成压缩摘要之后」的消息 + 摘要本体（以首条 user 消息
+ * 形态注入），摘要之前的原始消息不再进入上下文。
+ */
+export interface CompactPart {
+  type: 'compact_summary';
+}
+
 /** 消息里的结构化块（parts JSON 数组元素） */
-export type MessagePart = ToolCallPart | TodoPart | ImagePart;
+export type MessagePart = ToolCallPart | TodoPart | ImagePart | ResourceRefPart | CompactPart;
 
 /** 消息（chat_message 表） */
 export interface ChatMessage {
