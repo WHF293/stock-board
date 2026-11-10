@@ -11,6 +11,11 @@ import {
   CHART_TEXT_COLOR,
 } from '../../../../common/constants/chart.constants.ts';
 import {
+  BENCHMARK_INDEX_DEFAULT,
+  BENCHMARK_INDEX_OPTIONS,
+} from '../../../../common/constants/benchmark-index.constants.ts';
+import { fetchBenchmarkIndexPct } from '../../../../common/api/benchmark-index.api.ts';
+import {
   TZZB_RANGE_LABEL,
   TZZB_RANGE_OPTIONS,
   type TzzbPnlSummary,
@@ -23,16 +28,18 @@ import BaseChart from '../../charts/BaseChart.vue';
 import BaseTabs from '../../ui/BaseTabs.vue';
 
 /**
- * 投资账本 · 资产曲线（queryPnlSummary）
+ * 投资账本 · 资产曲线（queryPnlSummary + 腾讯基准指数）
  *
- * - 左轴净值指数（基点 1000），沪深300 / 上证按首点归一化对比；
+ * - 双模式（王总 2026-11-10 指定）：「盈亏率」= 自己的按日累计收益率曲线 +
+ *   单条基准指数累计涨跌幅曲线（select 四选一：上证 / 沪深300 / 创业板指 / 科创50）；
+ *   「收益」= 自己的累计收益金额曲线，不显示指数曲线；
+ * - 净值指数曲线已下线（原基点 1000 归一化对比，王总 2026-11-10 指定移除）；
+ * - 基准指数统一走腾讯不复权日 K（benchmark-index.api，会话级缓存），
+ *   不再依赖上游 shIndexTrend（其无科创板指数且行对齐不可靠）；
  * - 开关「仓位变化」：仓位移出主图，下方副图（K线主图+副图样式）按 3:1 高度比
  *   绘制黄色面积图，右轴 0~100%（王总 2026-11-09 定稿）；
- * - 开关「最大回撤」：净值曲线下方渲染黄色半透明背景（王总 2026-10-23 定稿：
- *   染色画在曲线下方，黄色；不再用峰值差 stack 填充）；
- * - 区间为受控状态（父级持有），切换时 emit 给父级重拉 queryPnlSummary——
- *   指标行「区间盈亏 / 对比沪深300」随之联动（王总 2026-10-23 确认口径）；
- *   mock 阶段采样只覆盖 2026-10，切区间数据不变仅状态联动
+ * - 开关「最大回撤」：主曲线下方渲染黄色半透明背景（王总 2026-10-23 定稿）；
+ * - 区间为受控状态（父级持有），切换时 emit 给父级重拉 queryPnlSummary
  */
 const props = defineProps<{
   /** 资产曲线汇总 */
@@ -83,34 +90,72 @@ const uwOn = ref(false);
 
 /** 曲线数据（空态兜底） */
 const trend = computed(() => props.pnl?.assetTrend ?? []);
-const idxTrend = computed(() => props.pnl?.indexTrend ?? []);
 
-/** 归一化后的曲线数据（空数据给占位单点防 ECharts 报错） */
+/** 图表模式：rate = 盈亏率（自己收益率 + 单条指数涨跌幅）；profit = 收益（累计收益金额，无指数） */
+const CHART_MODE_OPTIONS = [
+  { label: '盈亏率', value: 'rate' },
+  { label: '收益', value: 'profit' },
+] as const;
+const chartMode = ref<'rate' | 'profit'>('rate');
+
+/** 当前基准指数（腾讯符号；收益模式下不渲染指数线与选择器） */
+const indexSymbol = ref<string>(BENCHMARK_INDEX_DEFAULT);
+
+/** 当前选中指数的展示名 */
+const indexLabel = computed(
+  () => BENCHMARK_INDEX_OPTIONS.find((o) => o.value === indexSymbol.value)?.label ?? indexSymbol.value,
+);
+
+/**
+ * 归一化后的曲线数据（空数据给占位单点防 ECharts 报错）
+ *
+ * selfRate = 自己的按日累计收益率（%，首日相对化归零，与指数 0% 起点对齐）；
+ * cumProfit = 逐日盈亏累加的累计收益金额（元，区间首日起算）
+ */
 const trend0 = computed(() => {
   const asset = trend.value;
-  const idx = idxTrend.value;
   if (asset.length === 0) {
-    return { dates: ['-'], navVals: [1000], hs300Vals: [1000], shVals: [1000], posVals: [0] };
+    return { dates: ['-'], isoDates: ['-'], selfRate: [0], cumProfit: [0], posVals: [0] };
   }
-  const navVals = asset.map((p) => p.navIndex);
-  const base = navVals[0] || 1000;
-  const hs300Vals =
-    idx.length === asset.length && idx[0].hs300 !== 0
-      ? idx.map((p) => (p.hs300 / idx[0].hs300) * base)
-      : asset.map(() => base);
-  const shVals =
-    idx.length === asset.length && idx[0].sh !== 0
-      ? idx.map((p) => (p.sh / idx[0].sh) * base)
-      : asset.map(() => base);
-  const posVals = asset.map((p) => Number((p.positionRatio * 100).toFixed(2)));
+  let cum = 0;
+  const cumProfit = asset.map((p) => {
+    cum += p.dailyProfit;
+    return Number(cum.toFixed(2));
+  });
+  const rateBase = asset[0].cumRate;
   return {
     dates: asset.map((p) => dayjs(`${p.date.slice(0, 4)}-${p.date.slice(4, 6)}-${p.date.slice(6, 8)}`).format('MM-DD')),
-    navVals,
-    hs300Vals: hs300Vals.map((v) => Number(v.toFixed(2))),
-    shVals: shVals.map((v) => Number(v.toFixed(2))),
-    posVals,
+    isoDates: asset.map((p) => `${p.date.slice(0, 4)}-${p.date.slice(4, 6)}-${p.date.slice(6, 8)}`),
+    selfRate: asset.map((p) => Number(((p.cumRate - rateBase) * 100).toFixed(2))),
+    cumProfit,
+    posVals: asset.map((p) => Number((p.positionRatio * 100).toFixed(2))),
   };
 });
+
+/** 基准指数累计涨跌幅序列（%；拉取失败 / 加载中为空 = 不画指数线） */
+const indexPct = ref<number[]>([]);
+
+/** 指数序列请求序号（快速切换指数时丢弃过期响应） */
+let indexFetchSeq = 0;
+
+// 日期序列 / 选中指数变化 → 重取该指数的累计涨跌幅（失败降级为不画，不阻塞主曲线）
+watch(
+  [() => trend0.value.isoDates, indexSymbol],
+  async ([dates, symbol]) => {
+    const seq = ++indexFetchSeq;
+    if (dates.length < 2) {
+      indexPct.value = [];
+      return;
+    }
+    try {
+      const pct = await fetchBenchmarkIndexPct(symbol, dates);
+      if (seq === indexFetchSeq) indexPct.value = pct;
+    } catch {
+      if (seq === indexFetchSeq) indexPct.value = [];
+    }
+  },
+  { immediate: true },
+);
 
 /** 水下计算（trend 为空时 underwater 为空数组，消费侧短路） */
 const uw = computed(() => computeUnderwater(trend.value, props.trades ?? null));
@@ -212,53 +257,52 @@ const { height: boxH } = useElementSize(chartBox);
 
 const option = computed<EChartsCoreOption>(() => {
   void settingsStore.trendTheme;
-  const { dates, navVals, hs300Vals, shVals, posVals } = trend0.value;
+  const { dates, selfRate, cumProfit, posVals } = trend0.value;
+  const rateMode = chartMode.value === 'rate';
+  /** 主曲线数值（rate = 自己累计收益率；profit = 累计收益金额） */
+  const mainVals = rateMode ? selfRate : cumProfit;
 
   const series: Record<string, unknown>[] = [];
-  // 最大回撤：黄色半透明背景垫底（净值曲线下方，先渲染被后续曲线覆盖）
+  // 最大回撤：黄色半透明背景垫底（主曲线下方，先渲染被后续曲线覆盖）。
+  // origin: 'start' 固定填到网格底边 —— 默认 auto 会锚到 y=0 线，收益率曲线
+  // 过 0 轴后曲线在 0 下方时填充翻到曲线上方（王总 2026-11-10 反馈不绘制）
   if (ddOn.value) {
     series.push({
       name: '回撤背景',
       type: 'line',
-      data: navVals,
+      data: mainVals,
       symbol: 'none',
       lineStyle: { width: 0, opacity: 0 },
-      areaStyle: { color: CHART_LINE_YELLOW, opacity: 0.15 },
+      areaStyle: { color: CHART_LINE_YELLOW, opacity: 0.15, origin: 'start' },
       tooltip: { show: false },
       silent: true,
       z: 0,
     });
   }
-  series.push(
-    {
-      name: '账户净值',
+  series.push({
+    name: rateMode ? '收益率' : '累计收益',
+    type: 'line',
+    data: mainVals,
+    symbol: 'none',
+    lineStyle: { color: CHART_LINE_BLUE, width: 2 },
+    itemStyle: { color: CHART_LINE_BLUE },
+    areaStyle: { color: CHART_LINE_BLUE, opacity: 0.07, origin: 'start' },
+  });
+  // 基准指数线：仅盈亏率模式且序列就绪时渲染（收益模式不显示指数曲线）
+  const hasIndex = rateMode && indexPct.value.length === dates.length;
+  if (hasIndex) {
+    series.push({
+      name: indexLabel.value,
       type: 'line',
-      data: navVals,
-      symbol: 'none',
-      lineStyle: { color: CHART_LINE_BLUE, width: 2 },
-      itemStyle: { color: CHART_LINE_BLUE },
-      areaStyle: { color: CHART_LINE_BLUE, opacity: 0.07 },
-    },
-    {
-      name: '沪深300',
-      type: 'line',
-      data: hs300Vals,
-      symbol: 'none',
-      lineStyle: { color: '#94a3b8', width: 1.4 },
-      itemStyle: { color: '#94a3b8' },
-    },
-    {
-      name: '上证指数',
-      type: 'line',
-      data: shVals,
+      data: indexPct.value,
       symbol: 'none',
       lineStyle: { color: CHART_LINE_YELLOW, width: 1.4 },
       itemStyle: { color: CHART_LINE_YELLOW },
-    },
-  );
+    });
+  }
 
   // 仓位副图开启：主图 / 副图双 grid 按 3:1 切分容器实高（K线主图+副图样式），
-  // 仓位画成副图紫色面积图；关闭时回到原单 grid 布局
+  // 仓位画成副图黄色面积图；关闭时回到原单 grid 布局
   const subOn = posOn.value;
   const boxHeight = boxH.value > 0 ? boxH.value : CHART_BOX_FALLBACK_HEIGHT;
   const plotHeight = boxHeight - PANE_TOP_PAD - PANE_BOTTOM_PAD - (subOn ? PANE_GAP : 0);
@@ -279,6 +323,14 @@ const option = computed<EChartsCoreOption>(() => {
     });
   }
 
+  /**
+   * 主轴数值文案（rate = 百分数；profit = 千分位元）
+   * @param v 主曲线数值
+   * @returns 格式化文案
+   */
+  const mainText = (v: number): string =>
+    rateMode ? `${v.toFixed(2)}%` : `¥${v.toLocaleString('zh-CN', { maximumFractionDigits: 0 })}`;
+
   return {
     grid: subOn
       ? [
@@ -294,19 +346,15 @@ const option = computed<EChartsCoreOption>(() => {
         const first = list[0] as { axisValue?: string; dataIndex?: number } | undefined;
         const date = first?.axisValue ?? '';
         const i = first?.dataIndex ?? -1;
-        // 主图 / 副图共用同一条日期轴，按 dataIndex 直取另一幅的值，悬停任一幅都给全量
         const lines = [`<b>${date}</b>`];
-        if (i >= 0 && navVals[i] !== undefined) lines.push(`净值指数 ${navVals[i]}`);
+        if (i >= 0 && mainVals[i] !== undefined) {
+          lines.push(`${rateMode ? '收益率' : '累计收益'} ${mainText(mainVals[i])}`);
+        }
+        if (hasIndex && i >= 0 && indexPct.value[i] !== undefined) {
+          lines.push(`<span style="color:${CHART_LINE_YELLOW}">${indexLabel.value} ${indexPct.value[i]}%</span>`);
+        }
         if (i >= 0 && subOn && posVals[i] !== undefined) {
           lines.push(`<span style="color:${CHART_LINE_YELLOW}">仓位 ${posVals[i]}%</span>`);
-        }
-        const pick = (name: string): string | null => {
-          const hit = list.find((p) => (p as { seriesName?: string }).seriesName === name);
-          return hit ? String((hit as { data?: unknown }).data) : null;
-        };
-        for (const name of ['沪深300', '上证指数']) {
-          const v = pick(name);
-          if (v) lines.push(`${name} ${v}`);
         }
         return lines.join('<br/>');
       },
@@ -348,7 +396,11 @@ const option = computed<EChartsCoreOption>(() => {
             gridIndex: 0,
             scale: true,
             splitLine: { lineStyle: { color: CHART_SPLIT_LINE_COLOR } },
-            axisLabel: { color: CHART_TEXT_COLOR, fontSize: 10, formatter: (v: number) => v.toFixed(0) },
+            axisLabel: {
+              color: CHART_TEXT_COLOR,
+              fontSize: 10,
+              formatter: (v: number) => (rateMode ? `${v.toFixed(1)}%` : v.toLocaleString('zh-CN', { maximumFractionDigits: 0 })),
+            },
           },
           {
             type: 'value',
@@ -370,7 +422,11 @@ const option = computed<EChartsCoreOption>(() => {
             type: 'value',
             scale: true,
             splitLine: { lineStyle: { color: CHART_SPLIT_LINE_COLOR } },
-            axisLabel: { color: CHART_TEXT_COLOR, fontSize: 10, formatter: (v: number) => v.toFixed(0) },
+            axisLabel: {
+              color: CHART_TEXT_COLOR,
+              fontSize: 10,
+              formatter: (v: number) => (rateMode ? `${v.toFixed(1)}%` : v.toLocaleString('zh-CN', { maximumFractionDigits: 0 })),
+            },
           },
         ],
     series,
@@ -379,10 +435,22 @@ const option = computed<EChartsCoreOption>(() => {
 </script>
 
 <template>
-  <div class="flex h-full flex-col">
-    <!-- 区间切换 + 开关 -->
-    <div class="mb-2 flex flex-wrap items-center gap-3">
+  <div class="flex flex-1 flex-col">
+    <!-- 控制区两行：区间独占一行，模式 / 指数 / 开关一行 -->
+    <div class="mb-2">
       <BaseTabs v-model="rangeModel" :options="TZZB_RANGE_OPTIONS" />
+    </div>
+    <div class="mb-2 flex flex-wrap items-center gap-3">
+      <BaseTabs v-model="chartMode" :options="CHART_MODE_OPTIONS" />
+      <!-- 基准指数四选一（一次只画一条；收益模式下不显示指数，选择器一并隐藏） -->
+      <select
+        v-if="chartMode === 'rate'"
+        v-model="indexSymbol"
+        class="rounded-lg bg-flat-weak px-2 py-1 text-xs text-text outline-none"
+        aria-label="切换基准指数"
+      >
+        <option v-for="o in BENCHMARK_INDEX_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
+      </select>
       <label class="flex cursor-pointer items-center gap-1.5 text-xs text-text-secondary">
         <input v-model="posOn" type="checkbox" class="accent-primary" />
         仓位变化
@@ -405,8 +473,11 @@ const option = computed<EChartsCoreOption>(() => {
       <span class="text-text-tertiary">正式接入后按起止日调 queryPnlSummary（区间过长自动分段）</span>
     </div>
 
-    <!-- 图表（开启「仓位变化」时内部按 3:1 分主图 / 仓位副图两个 grid） -->
-    <div ref="chartBox" class="relative min-h-0 flex-1">
+    <!-- 图表（开启「仓位变化」时内部按 3:1 分主图 / 仓位副图两个 grid）。
+         高度必须是确定值：BaseChart 根元素为 h-full（百分比高度），父容器高度
+         一旦是 flex/auto（百分比解析为 auto）ECharts 容器会塌成 0 高不渲染；
+         勾选「回撤水下」时下方还有子图 + 回撤段表格，切小档给它们留空间 -->
+    <div ref="chartBox" class="relative shrink-0" :class="uwOn ? 'h-56' : 'h-72'">
       <BaseChart :options="option" not-merge />
     </div>
 
@@ -458,7 +529,11 @@ const option = computed<EChartsCoreOption>(() => {
       </div>
     </template>
     <p class="mt-1 shrink-0 text-xs text-text-tertiary">
-      左轴净值指数（基点 1000）{{ posOn ? ' · 副图仓位 %（右轴）' : '' }} · {{ rangeLabel }}
+      {{
+        chartMode === 'rate'
+          ? `收益率按日累计（首日归零）${indexPct.length > 0 ? ` · 对比${indexLabel}累计涨跌幅` : ''}`
+          : '累计收益金额（区间首日起逐日盈亏累加）'
+      }}{{ posOn ? ' · 副图仓位 %（右轴）' : '' }} · {{ rangeLabel }}
     </p>
   </div>
 </template>

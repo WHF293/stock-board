@@ -116,65 +116,69 @@ const chartOptions = computed<EChartsCoreOption>(() => {
 </script>
 
 <template>
-  <div v-if="summary" class="flex flex-col gap-4 xl:flex-row xl:items-stretch">
-    <!-- 左：费用总额 + 拆项 -->
-    <div class="shrink-0 xl:w-56">
-      <p class="text-xs text-text-secondary">区间费用合计（{{ summary.tradeCount }} 笔流水）</p>
-      <p class="mt-1 text-2xl font-semibold tabular-nums text-down">-{{ yuan(summary.total) }}</p>
-      <div class="mt-3">
+  <!-- 外层 @container：容器查询只认祖先容器（元素量不到自己），
+       内层按容器实宽切换布局 —— ≥42rem 横排三栏，窄列（本卡 xl 网格 1/3）纵向堆叠 -->
+  <div class="@container min-w-0">
+    <div v-if="summary" class="flex flex-col gap-4 @2xl:flex-row @2xl:items-stretch">
+      <!-- 左：费用总额 + 拆项 -->
+      <div class="@2xl:w-56 @2xl:shrink-0">
+        <p class="text-xs text-text-secondary">区间费用合计（{{ summary.tradeCount }} 笔流水）</p>
+        <p class="mt-1 text-2xl font-semibold tabular-nums text-down">-{{ yuan(summary.total) }}</p>
+        <div class="mt-3">
+          <div
+            v-for="row in feeRows"
+            :key="row.label"
+            class="flex items-center justify-between border-b border-dashed border-flat-weak py-1.5 text-[13px] last:border-b-0"
+          >
+            <span class="text-text-secondary">
+              {{ row.label }}
+              <span v-if="row.inferred" class="ml-0.5 rounded bg-flat-weak px-1 text-[10px] text-text-tertiary">推断</span>
+            </span>
+            <span class="font-mono tabular-nums text-text">{{ yuan(row.value) }}</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 中：月度费用趋势 -->
+      <div class="min-w-0 flex-1">
+        <p class="mb-1 text-xs text-text-secondary">月度费用趋势</p>
+        <div class="h-36 min-w-0">
+          <BaseChart :options="chartOptions" not-merge />
+        </div>
+      </div>
+
+      <!-- 右：比率 + 模板化结论 -->
+      <div class="@2xl:w-72 @2xl:shrink-0">
+        <p class="mb-1 text-xs text-text-secondary">摩擦强度</p>
         <div
-          v-for="row in feeRows"
-          :key="row.label"
-          class="flex items-center justify-between border-b border-dashed border-flat-weak py-1.5 text-[13px] last:border-b-0"
+          class="flex items-center justify-between gap-3 border-b border-dashed border-flat-weak py-1.5 text-[13px]"
         >
-          <span class="text-text-secondary">
-            {{ row.label }}
-            <span v-if="row.inferred" class="ml-0.5 rounded bg-flat-weak px-1 text-[10px] text-text-tertiary">推断</span>
+          <span class="text-text-secondary">费用拖累比（费用 / |已实现盈亏|）</span>
+          <span class="shrink-0 font-mono font-medium tabular-nums text-up">
+            {{ summary.dragRatio === null ? '—' : pct(summary.dragRatio) }}
           </span>
-          <span class="font-mono tabular-nums text-text">{{ yuan(row.value) }}</span>
+        </div>
+        <div class="flex items-center justify-between gap-3 py-1.5 text-[13px]">
+          <span class="text-text-secondary">区间换手率（成交额 / 平均总资产）</span>
+          <span class="shrink-0 font-mono font-medium tabular-nums text-text">
+            {{ summary.turnoverRate === null ? '—' : `${(summary.turnoverRate * 100).toFixed(0)}%` }}
+          </span>
+        </div>
+        <div class="mt-2 rounded-lg bg-flat-weak px-3 py-2 text-xs leading-5 text-text-secondary">
+          <template v-if="peakMonth">
+            每实现 100 元盈亏，约有
+            {{ summary.dragRatio === null ? '—' : (summary.dragRatio * 100).toFixed(1) }}
+            元用于交易摩擦；{{ peakMonth.month.replace('-', ' 年 ') }} 月费用最高（{{
+              yuan(peakMonth.total)
+            }}），对应当月成交最密集。
+          </template>
+          <template v-else>流水无有效成交日期，无法生成月度结论。</template>
         </div>
       </div>
     </div>
 
-    <!-- 中：月度费用趋势 -->
-    <div class="min-w-0 flex-1">
-      <p class="mb-1 text-xs text-text-secondary">月度费用趋势</p>
-      <div class="h-36 min-w-0">
-        <BaseChart :options="chartOptions" not-merge />
-      </div>
+    <div v-else class="flex flex-col items-center gap-2 py-6 text-text-tertiary">
+      <p class="text-sm">暂无交易流水：同步投资账本后自动生成摩擦账本</p>
     </div>
-
-    <!-- 右：比率 + 模板化结论 -->
-    <div class="shrink-0 xl:w-72">
-      <p class="mb-1 text-xs text-text-secondary">摩擦强度</p>
-      <div
-        class="flex items-center justify-between border-b border-dashed border-flat-weak py-1.5 text-[13px]"
-      >
-        <span class="text-text-secondary">费用拖累比（费用 / |已实现盈亏|）</span>
-        <span class="font-mono font-medium tabular-nums text-up">
-          {{ summary.dragRatio === null ? '—' : pct(summary.dragRatio) }}
-        </span>
-      </div>
-      <div class="flex items-center justify-between py-1.5 text-[13px]">
-        <span class="text-text-secondary">区间换手率（成交额 / 平均总资产）</span>
-        <span class="font-mono font-medium tabular-nums text-text">
-          {{ summary.turnoverRate === null ? '—' : `${(summary.turnoverRate * 100).toFixed(0)}%` }}
-        </span>
-      </div>
-      <div class="mt-2 rounded-lg bg-flat-weak px-3 py-2 text-xs leading-5 text-text-secondary">
-        <template v-if="peakMonth">
-          每实现 100 元盈亏，约有
-          {{ summary.dragRatio === null ? '—' : (summary.dragRatio * 100).toFixed(1) }}
-          元用于交易摩擦；{{ peakMonth.month.replace('-', ' 年 ') }} 月费用最高（{{
-            yuan(peakMonth.total)
-          }}），对应当月成交最密集。
-        </template>
-        <template v-else>流水无有效成交日期，无法生成月度结论。</template>
-      </div>
-    </div>
-  </div>
-
-  <div v-else class="flex flex-col items-center gap-2 py-6 text-text-tertiary">
-    <p class="text-sm">暂无交易流水：同步投资账本后自动生成摩擦账本</p>
   </div>
 </template>

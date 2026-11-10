@@ -31,6 +31,10 @@ export interface TzzbAssetPoint {
   navIndex: number;
   /** 仓位比例 0~1 */
   positionRatio: number;
+  /** 当日盈亏率（小数口径，上游 dailyReturnRate） */
+  dailyRate: number;
+  /** 截至当日的区间累计收益率（小数口径，上游 totalReturnRate） */
+  cumRate: number;
 }
 
 /** 指数趋势点（queryPnlSummary.shIndexTrend，点位原值，绘图时按基点归一化） */
