@@ -25,7 +25,9 @@ import {
   getTzzbAssetChange,
   getTzzbClearedPositions,
   getTzzbDayCalendar,
+  getTzzbFundCycles,
   getTzzbFundHoldingReturns,
+  fetchTzzbAllStockTrades,
   getTzzbFundTrades,
   getTzzbMonthCalendar,
   getTzzbPnlSummary,
@@ -47,6 +49,7 @@ import type {
   TzzbAssetChange,
   TzzbClearedPosition,
   TzzbDayCalendar,
+  TzzbFundCycle,
   TzzbFundTrade,
   TzzbHoldingReturn,
   TzzbMonthCalendar,
@@ -57,7 +60,7 @@ import type {
   TzzbSyncMeta,
   TzzbYearPoint,
 } from '../../../../common/types/tzzb.types.ts';
-import { TZZB_RANGE_LABEL, TZZB_TRADE_FETCH_MAX_PAGES } from '../../../../common/types/tzzb.types.ts';
+import { TZZB_RANGE_LABEL } from '../../../../common/types/tzzb.types.ts';
 import TzzbTopbar from './TzzbTopbar.vue';
 import TzzbAccountSelectModal from './TzzbAccountSelectModal.vue';
 import TzzbErrorDetailModal from './TzzbErrorDetailModal.vue';
@@ -377,28 +380,13 @@ const monthCal = ref<TzzbMonthCalendar | null>(null);
 const yearPoints = ref<TzzbYearPoint[]>([]);
 const cleared = ref<TzzbClearedPosition[]>([]);
 const fundReturns = ref<TzzbHoldingReturn[]>([]);
+/** 基金持仓回合（本地由申赎流水重构，长短线维度分析用） */
+const fundCycles = ref<TzzbFundCycle[]>([]);
 const stockTrades = ref<TzzbStockTradePage | null>(null);
 const fundTrades = ref<TzzbFundTrade[]>([]);
 
 /** 摩擦账本全量流水（统计窗口内逐页合并，与交易记录首页共用一次首拉） */
 const allStockTrades = ref<TzzbStockTrade[] | null>(null);
-
-/**
- * 拉取统计窗口内全量股票流水（摩擦账本口径；逐页串行，页数上限防御异常 maxPage）
- * @returns 首页分页结构（list 已合并全量页）；未配置代理时返回 null
- */
-const loadAllStockTrades = async (): Promise<TzzbStockTradePage | null> => {
-  const first = await getTzzbStockTrades('1');
-  if (!first) return null;
-  const list = [...first.list];
-  const maxPage = Math.min(first.maxPage, TZZB_TRADE_FETCH_MAX_PAGES);
-  for (let page = 2; page <= maxPage; page += 1) {
-    const next = await getTzzbStockTrades(String(page));
-    if (!next || next.list.length === 0) break;
-    list.push(...next.list);
-  }
-  return { page: first.page, maxPage: first.maxPage, list };
-};
 
 /** 最新净值点（当日盈亏口径：assetTrend 最后一个交易日；null = 无曲线数据） */
 const lastPoint = computed(() => {
@@ -424,6 +412,7 @@ interface ScopeSnapshot {
   yearPoints: TzzbYearPoint[];
   cleared: TzzbClearedPosition[];
   fundReturns: TzzbHoldingReturn[];
+  fundCycles: TzzbFundCycle[];
   stockTrades: TzzbStockTradePage | null;
   allStockTrades: TzzbStockTrade[] | null;
   fundTrades: TzzbFundTrade[];
@@ -465,6 +454,7 @@ const captureScope = (): ScopeSnapshot => ({
   yearPoints: yearPoints.value,
   cleared: cleared.value,
   fundReturns: fundReturns.value,
+  fundCycles: fundCycles.value,
   stockTrades: stockTrades.value,
   allStockTrades: allStockTrades.value,
   fundTrades: fundTrades.value,
@@ -489,6 +479,7 @@ const applyScope = (s: ScopeSnapshot): void => {
   yearPoints.value = s.yearPoints;
   cleared.value = s.cleared;
   fundReturns.value = s.fundReturns;
+  fundCycles.value = s.fundCycles;
   stockTrades.value = s.stockTrades;
   allStockTrades.value = s.allStockTrades;
   fundTrades.value = s.fundTrades;
@@ -928,7 +919,7 @@ const selectedName = computed(
 /* ---------------- 加载 ---------------- */
 
 /** 同步任务总数（loadAll 并行任务数，进度条分母；账户列表走独立缓存初始化，不计入） */
-const SYNC_TASK_TOTAL = 11;
+const SYNC_TASK_TOTAL = 12;
 
 /** 同步进度（null = 未在同步；done/total 驱动顶栏进度条） */
 const syncProgress = ref<{ done: number; total: number } | null>(null);
@@ -965,10 +956,11 @@ const loadAll = async (
     getTzzbYearPoints([dayjs().format('YYYY'), dayjs().subtract(1, 'year').format('YYYY')]).finally(bump),
     getTzzbClearedPositions().finally(bump),
     getTzzbFundHoldingReturns().finally(bump),
-    loadAllStockTrades().finally(bump),
+    getTzzbFundCycles().finally(bump),
+    fetchTzzbAllStockTrades().finally(bump),
     getTzzbFundTrades(dayjs().format('YYYY-MM')).finally(bump),
   ]);
-  const [meta, pnlR, posR, chgR, dayR, monR, yearR, clrR, fundRetR, tradeR, fundTradeR] = results;
+  const [meta, pnlR, posR, chgR, dayR, monR, yearR, clrR, fundRetR, fundCycR, tradeR, fundTradeR] = results;
   if (meta.status === 'fulfilled') syncMeta.value = meta.value;
   if (pnlR.status === 'fulfilled') pnl.value = pnlR.value;
   if (posR.status === 'fulfilled') position.value = posR.value;
@@ -978,6 +970,7 @@ const loadAll = async (
   if (yearR.status === 'fulfilled') yearPoints.value = yearR.value;
   if (clrR.status === 'fulfilled') cleared.value = clrR.value;
   if (fundRetR.status === 'fulfilled') fundReturns.value = fundRetR.value;
+  if (fundCycR.status === 'fulfilled') fundCycles.value = fundCycR.value;
   if (tradeR.status === 'fulfilled') {
     stockTrades.value = tradeR.value;
     // 摩擦账本口径：首页分页结构里的 list 已合并全量页
@@ -1357,7 +1350,7 @@ const openStockDetailPage = (code: string): void => {
             <MenuIcon name="agent" :size="14" />
           </button>
         </template>
-        <TzzbClearedAnalysis :cleared="cleared" :fund-returns="fundReturns" :day-calendar="dayCal" @open="openStockDetail" @open-page="openStockDetailPage" />
+        <TzzbClearedAnalysis :cleared="cleared" :fund-returns="fundReturns" :fund-cycles="fundCycles" :day-calendar="dayCal" @open="openStockDetail" @open-page="openStockDetailPage" />
       </BaseCard>
 
       <!-- ⑦ 交易记录（页签在标题行右侧；历史导入页签已删）。
@@ -1373,6 +1366,8 @@ const openStockDetailPage = (code: string): void => {
             :all-stock-trades="allStockTrades"
             :fund-trades="fundTrades"
             @page="onTradePage"
+            @open="openStockDetail"
+            @open-page="openStockDetailPage"
           />
         </template>
         <div v-else class="flex flex-col gap-6">
@@ -1384,6 +1379,8 @@ const openStockDetailPage = (code: string): void => {
               :all-stock-trades="allStockTrades"
               :fund-trades="fundTrades"
               @page="onTradePage"
+              @open="openStockDetail"
+              @open-page="openStockDetailPage"
             />
           </div>
           <div>
@@ -1394,6 +1391,8 @@ const openStockDetailPage = (code: string): void => {
               :all-stock-trades="allStockTrades"
               :fund-trades="fundTrades"
               @page="onTradePage"
+              @open="openStockDetail"
+              @open-page="openStockDetailPage"
             />
           </div>
         </div>

@@ -1,6 +1,8 @@
 import { isTauri } from '@tauri-apps/api/core';
 import Database from '@tauri-apps/plugin-sql';
 import { mergeSymbolTradeRecords } from '../utils/merge-symbol-trade-records';
+import { getTzzbAllStockTrades } from './tzzb.api.ts';
+import type { TzzbStockTrade } from '../types/tzzb.types.ts';
 import type { AccountTradeRecord, ImportKind } from '../types/account.types.ts';
 
 /**
@@ -8,8 +10,10 @@ import type { AccountTradeRecord, ImportKind } from '../types/account.types.ts';
  *
  * 交割单 / 对账单两表同构（account_trade_record / account_statement_record），
  * 由 kind 映射表名。手工文件导入已下线，本模块仅保留读取与级联删除：
- * 现存数据为历史导入存量，后续由投资账本官方 MCP 同步接管写路径。
- * 浏览器端降级：非 Tauri 环境读取返回空
+ * 现存数据为历史导入存量。个股成交记录（listTradeRecordsBySymbol）在本机库
+ * 之外合并同花顺投资账本（MCP）股票流水——本机库只覆盖历史导入存量，
+ * 账本流水覆盖 ETF 等全品种（2026-11-10 王总反馈侧栏 ETF 无记录）；
+ * 浏览器端降级：本机库读取返回空，账本流水照常合并
  */
 
 /** 连接单例 */
@@ -83,29 +87,89 @@ export const listTradeRecords = async (
 };
 
 /**
- * 读取个股的全部成交记录（供个股详情页「交易记录」）
+ * 账本股票流水 → 成交记录（口径对齐本机库形态）
  *
- * 交割单表覆盖更长历史（实测 2024-10 起）全量保留，对账单表只补充其缺失部分；
- * 合并与跨表去重口径见 utils/merge-symbol-trade-records
+ * 账本流水无成交时间（仅到日）、无账户维度（归入固定虚拟账户 'tzzb-mcp'）；
+ * quantity 原文无符号，方向看操作名（卖出转负）
+ * @param t 账本股票流水行
+ * @returns 成交记录
+ */
+const mapTzzbTrade = (t: TzzbStockTrade): AccountTradeRecord => ({
+  id: `tzzb-${t.date}-${t.code}-${t.action}-${t.quantity}-${t.price}`,
+  accountId: 'tzzb-mcp',
+  tradeDate: t.date,
+  tradeTime: '',
+  symbol: t.code,
+  stockName: t.name,
+  action: t.action,
+  quantity: t.action.includes('卖') ? -Math.abs(t.quantity) : Math.abs(t.quantity),
+  price: t.price,
+  amount: t.amount,
+  balance: null,
+  netAmount: t.amount,
+  afterAmount: null,
+  stampTax: 0,
+  commission: t.commission,
+  transferFee: t.transferFee,
+  entrustFee: 0,
+  serviceFee: 0,
+  contractNo: '',
+  dealNo: '',
+  market: '',
+  importedAt: 0,
+});
+
+/**
+ * 跨源同笔匹配键（本机库 × 账本流水去重）：日期 + 代码 + 方向数量 + 价格 + 操作。
+ * 价格取 3 位小数归一避免浮点尾差；本机记录优先保留（含成交时间与费用明细）
+ * @param record 成交记录
+ * @returns 匹配键
+ */
+const crossSourceIdentity = (record: AccountTradeRecord): string =>
+  [record.tradeDate, record.symbol, Math.abs(record.quantity), record.price.toFixed(3), record.action].join('|');
+
+/**
+ * 读取个股的全部成交记录（供个股详情页「交易记录」与 K 线 BS/T 标注）
+ *
+ * 本机库：交割单表覆盖更长历史（实测 2024-10 起）全量保留，对账单表只补充其缺失部分；
+ * 合并与跨表去重口径见 utils/merge-symbol-trade-records。symbol 匹配同时覆盖
+ * 库内存量的带市场前缀形态（sh/sz/bj）。
+ * 账本流水（MCP）：按 6 位代码过滤后并入，与本机库同笔去重（本机优先）；
+ * 拉取失败静默为空（不阻塞本机记录展示）
  * @param symbol 个股符号（sh600519 / 600519 形态均可）
  * @returns 成交记录（按日期时间倒序，最新在前）
  */
 export const listTradeRecordsBySymbol = async (symbol: string): Promise<AccountTradeRecord[]> => {
-  const db = getDb();
-  if (!db) return [];
   const code = symbol.replace(/^(sh|sz|bj)/i, '');
-  const conn = await db;
-  const [tradeRows, statementRows] = await Promise.all([
-    conn.select<Record<string, unknown>[]>(
-      'SELECT * FROM account_trade_record WHERE symbol = $1',
-      [code],
-    ),
-    conn.select<Record<string, unknown>[]>(
-      'SELECT * FROM account_statement_record WHERE symbol = $1',
-      [code],
-    ),
-  ]);
-  return mergeSymbolTradeRecords(tradeRows.map(mapRow), statementRows.map(mapRow));
+  // 库内 symbol 存量可能带市场前缀（sh/sz/bj），四形态一并命中
+  const variants = [code, `sh${code}`, `sz${code}`, `bj${code}`];
+  const db = getDb();
+  let local: AccountTradeRecord[] = [];
+  if (db) {
+    const conn = await db;
+    const [tradeRows, statementRows] = await Promise.all([
+      conn.select<Record<string, unknown>[]>(
+        'SELECT * FROM account_trade_record WHERE symbol IN ($1, $2, $3, $4)',
+        variants,
+      ),
+      conn.select<Record<string, unknown>[]>(
+        'SELECT * FROM account_statement_record WHERE symbol IN ($1, $2, $3, $4)',
+        variants,
+      ),
+    ]);
+    local = mergeSymbolTradeRecords(tradeRows.map(mapRow), statementRows.map(mapRow));
+  }
+  let mcp: AccountTradeRecord[] = [];
+  try {
+    const trades = await getTzzbAllStockTrades();
+    mcp = trades.filter((t) => t.code === code).map(mapTzzbTrade);
+  } catch (error) {
+    console.warn('[account-records-db] merge tzzb trades failed', error);
+  }
+  const localKeys = new Set(local.map(crossSourceIdentity));
+  return [...local, ...mcp.filter((record) => !localKeys.has(crossSourceIdentity(record)))].sort(
+    (a, b) => `${b.tradeDate} ${b.tradeTime}`.localeCompare(`${a.tradeDate} ${a.tradeTime}`),
+  );
 };
 
 /**

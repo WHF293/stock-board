@@ -202,6 +202,29 @@ export interface TzzbFundTrade {
   shares: number;
 }
 
+/**
+ * 基金持仓回合（本地由申赎流水 queryFundSummaryHistory 重构；上游无基金清仓周期工具）
+ *
+ * 口径：按基金聚合全历史申赎流水，从首笔申购起累计份额，份额清零（全额赎回）即闭合一个回合；
+ * 持有中回合 closeDate 为 null。盈亏为现金流估算（回收 − 投入），分红再投等场景会有偏差
+ */
+export interface TzzbFundCycle {
+  code: string;
+  name: string;
+  /** 开仓日（回合首笔申购确认日）yyyy-MM-dd */
+  openDate: string;
+  /** 清仓日（份额清零确认日）；null = 持有中 */
+  closeDate: string | null;
+  /** 持有天数（自然日；持有中算到今天） */
+  holdDays: number;
+  /** 累计申购金额 */
+  buyAmount: number;
+  /** 累计赎回金额 */
+  sellAmount: number;
+  /** 估算盈亏（回收 − 投入；持有中为截至当前的现金流差） */
+  estProfit: number;
+}
+
 /** 同步状态（mock 阶段取采样元信息，真实阶段取 tzzb_sync_state 水位） */
 export interface TzzbSyncMeta {
   /** 上次同步时间（展示文案） */

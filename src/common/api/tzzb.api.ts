@@ -1,4 +1,5 @@
 import dayjs from 'dayjs';
+import { TZZB_TRADE_FETCH_MAX_PAGES } from '../types/tzzb.types.ts';
 import {
   TZZB_INDEX_NAME,
   type TzzbAccount,
@@ -6,6 +7,7 @@ import {
   type TzzbAssetChange,
   type TzzbClearedPosition,
   type TzzbDayCalendar,
+  type TzzbFundCycle,
   type TzzbFundTrade,
   type TzzbHoldingReturn,
   type TzzbMonthCalendar,
@@ -765,6 +767,40 @@ export const getTzzbStockTrades = async (
   return { page: num(r['page']) || 1, maxPage: num(r['maxPage']) || 1, list };
 };
 
+/** 全量股票流水内存缓存（dashboard 同步时覆盖写入；个股详情「交易记录」等低频入口免翻页复用） */
+let allStockTradesCache: TzzbStockTrade[] | null = null;
+
+/**
+ * 拉取统计窗口内全量股票流水（首页 + 逐页串行合并，页数上限防御异常 maxPage；
+ * list 覆盖写内存缓存供个股详情「交易记录」等低频入口免翻页复用）
+ * @returns 首页分页结构（list 已合并全量页）；未配置代理 / 调用失败时返回 null
+ */
+export const fetchTzzbAllStockTrades = async (): Promise<TzzbStockTradePage | null> => {
+  const first = await getTzzbStockTrades('1');
+  if (!first) return null;
+  const list = [...first.list];
+  const maxPage = Math.min(first.maxPage, TZZB_TRADE_FETCH_MAX_PAGES);
+  for (let page = 2; page <= maxPage; page += 1) {
+    const next = await getTzzbStockTrades(String(page));
+    if (!next || next.list.length === 0) break;
+    list.push(...next.list);
+  }
+  allStockTradesCache = list;
+  return { page: first.page, maxPage: first.maxPage, list };
+};
+
+/**
+ * 读取全量股票流水（有缓存直接返回；无缓存时拉取一次并落缓存）
+ *
+ * 供个股详情「交易记录」合并账本流水等低频入口使用；注意缓存口径跟随
+ * 最近一次数据层账户范围（setTzzbAccountScope），聚焦单账户时仅含该账户流水
+ * @returns 全量流水；未配置代理 / 调用失败时返回空数组
+ */
+export const getTzzbAllStockTrades = async (): Promise<TzzbStockTrade[]> => {
+  if (allStockTradesCache) return allStockTradesCache;
+  return (await fetchTzzbAllStockTrades())?.list ?? [];
+};
+
 /**
  * 基金申赎流水（queryFundSummaryHistory；六元组重复行去重）
  * @param month 月份 yyyy-MM
@@ -808,6 +844,99 @@ export const getTzzbFundTrades = async (month: string): Promise<TzzbFundTrade[]>
     }
   }
   return out;
+};
+
+/**
+ * 基金持仓回合重构的数据起点（yyyy-MM）
+ *
+ * 与 getTzzbClearedPositions 的 openDate='2025-09-30' 同口径：账本数据起始月，
+ * 早于该月的申赎流水不存在，回合重构从本月起全量拉取
+ */
+export const TZZB_FUND_CYCLE_START_MONTH = '2025-09';
+
+/** 回合闭合的份额归零阈值（浮点累加误差容差） */
+const FUND_CYCLE_SHARE_EPS = 1e-4;
+
+/**
+ * 基金持仓回合（本地重构；上游无基金清仓周期工具）
+ *
+ * 从数据起始月（TZZB_FUND_CYCLE_START_MONTH）到当月逐月拉申赎流水（复用
+ * getTzzbFundTrades 的去重口径），按基金聚合重构「首笔申购 → 份额清零」回合：
+ * - 买入类操作（申购 / 定投 / 买入）累计份额与投入金额；首笔买入日记开仓日
+ * - 卖出类操作（赎回 / 卖出）扣减份额与回收金额；份额清零日闭合回合
+ * - 流水耗尽仍未清零 → 持有中回合（closeDate=null，持有天数算到今天）
+ * - 估算盈亏 = 回收 − 投入（现金流口径，分红再投等会有偏差，展示层需标注）
+ *
+ * @returns 回合列表（按开仓日升序）；未配置代理 / 全部月份拉取失败时返回空数组
+ */
+export const getTzzbFundCycles = async (): Promise<TzzbFundCycle[]> => {
+  const start = dayjs(TZZB_FUND_CYCLE_START_MONTH);
+  const end = dayjs();
+  const months: string[] = [];
+  for (let m = start; !m.isAfter(end, 'month'); m = m.add(1, 'month')) {
+    months.push(m.format('YYYY-MM'));
+  }
+  // 串行逐月拉取（MCP 会话复用；单月失败跳过不影响其余月份）
+  const trades: TzzbFundTrade[] = [];
+  for (const month of months) {
+    try {
+      trades.push(...(await getTzzbFundTrades(month)));
+    } catch {
+      // 上游报错原样放行由调用方感知不了单月——跳过该月，回合可能因此偏长
+    }
+  }
+  if (trades.length === 0) return [];
+  // 按基金分组 + 确认日升序（同日按流水原序，先买后卖）
+  const byCode = new Map<string, { name: string; rows: TzzbFundTrade[] }>();
+  for (const t of [...trades].sort((a, b) => a.date.localeCompare(b.date))) {
+    const g = byCode.get(t.code) ?? { name: t.name, rows: [] };
+    g.name = t.name || g.name;
+    g.rows.push(t);
+    byCode.set(t.code, g);
+  }
+  const today = dayjs();
+  const out: TzzbFundCycle[] = [];
+  for (const [code, g] of byCode) {
+    let openDate: string | null = null;
+    let buyAmount = 0;
+    let sellAmount = 0;
+    let netShares = 0;
+    const close = (closeDate: string | null): void => {
+      if (!openDate) return;
+      const endDate = closeDate ? dayjs(closeDate) : today;
+      out.push({
+        code,
+        name: g.name,
+        openDate,
+        closeDate,
+        holdDays: Math.max(1, endDate.diff(dayjs(openDate), 'day') + 1),
+        buyAmount,
+        sellAmount,
+        estProfit: sellAmount - buyAmount,
+      });
+      openDate = null;
+      buyAmount = 0;
+      sellAmount = 0;
+      netShares = 0;
+    };
+    for (const t of g.rows) {
+      const isBuy = t.action.includes('申购') || t.action.includes('定投') || t.action.includes('买入');
+      const isSell = t.action.includes('赎回') || t.action.includes('卖出');
+      if (!isBuy && !isSell) continue; // 分红 / 转换等其它操作不影响回合
+      if (isBuy) {
+        if (!openDate) openDate = t.date;
+        buyAmount += t.amount;
+        netShares += t.shares;
+      } else {
+        if (!openDate) openDate = t.date; // 防御：首笔即赎回（建仓前流水缺失）
+        sellAmount += t.amount;
+        netShares -= t.shares;
+        if (netShares <= FUND_CYCLE_SHARE_EPS) close(t.date);
+      }
+    }
+    close(null); // 收尾：未清零 → 持有中
+  }
+  return out.sort((a, b) => a.openDate.localeCompare(b.openDate));
 };
 
 /** 授权信息响应形态（GET /tzzb-mcp/auth-info，dev server 本地端点，见 server/tzzb-mcp-proxy.ts） */

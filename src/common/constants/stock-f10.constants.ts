@@ -21,7 +21,7 @@ export const F10_SOURCE_NOTICE_TEXT =
  * 2026-10-24 王总指定：不同页签数据来源不同，标注不应常驻顶部）
  */
 export const F10_TAB_SOURCE_NOTICES: Readonly<Record<StockF10Tab, string>> = {
-  trade: '数据来源：账户成交流水（本机数据库）· 后续将切换为同花顺投资账本（MCP）',
+  trade: '数据来源：本机成交流水 + 同花顺投资账本（MCP）合并 · 同笔交易只保留本机记录',
   etf: '数据来源：东方财富 · 基金定期报告披露的持仓明细',
   financial: '数据来源：东方财富 · 上市公司财报',
   fund: '数据来源：东方财富 · 基金概况',

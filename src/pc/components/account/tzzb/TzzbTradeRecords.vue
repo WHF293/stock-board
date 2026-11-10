@@ -18,7 +18,8 @@ import type { TableColumn } from '../../../../common/types/table.types.ts';
  * - 基金流水：queryFundSummaryHistory（六元组重复行已在解析层去重）；
  * - 视图切换【明细 / 按品种汇总】（2026-11-09 王总指定）：明细为原平铺列表；
  *   汇总按个股 / 个基分组给出合计指标，点击分组展开该品种的明细行
- *   （股票汇总口径用全量流水 allStockTrades，分页首页覆盖不全）
+ *   （股票汇总口径用全量流水 allStockTrades，分页首页覆盖不全）；
+ * - 行 / 品种名交互（2026-11-10 王总指定，全站统一口径）：单击开侧栏 / 双击进详情
  */
 const props = defineProps<{
   /** 当前页签（stock / fund；父级页签条管理） */
@@ -34,6 +35,10 @@ const props = defineProps<{
 const emit = defineEmits<{
   /** 股票流水翻页（从 1 起） */
   page: [page: number];
+  /** 单击行 / 品种名：打开个股或基金详情侧栏（2026-11-10 王总指定全站统一口径） */
+  open: [code: string];
+  /** 双击行 / 品种名：跳个股详情整页 */
+  openPage: [code: string];
 }>();
 
 /** 视图模式：detail 平铺明细 / summary 按品种汇总（2026-11-10 起默认汇总） */
@@ -212,7 +217,11 @@ const fundGroups = computed<FundSummaryGroup[]>(() => {
           :rows="stockTrades.list"
           :row-key="(r) => `${r.date}-${r.code}-${r.action}-${r.quantity}-${r.price}`"
           :min-width="'820px'"
-          :footer-text="`第 ${currentPage} / ${stockTrades.maxPage} 页`"
+          row-clickable
+          enable-dblclick-nav
+          :footer-text="`第 ${currentPage} / ${stockTrades.maxPage} 页 · 单击开侧栏 / 双击进详情`"
+          @row-click="(r) => emit('open', r.code)"
+          @row-dblclick="(r) => emit('openPage', r.code)"
         >
           <template #name="{ row }">
             <span class="font-medium text-text">{{ row.name }}</span>
@@ -271,7 +280,12 @@ const fundGroups = computed<FundSummaryGroup[]>(() => {
                 class="shrink-0 text-text-tertiary transition-transform"
                 :class="expanded.has(g.code) ? 'rotate-90' : ''"
               />
-              <div class="min-w-0 flex-1">
+              <div
+                class="min-w-0 flex-1 cursor-pointer"
+                title="单击开侧栏 / 双击进详情 · 行其他位置展开明细"
+                @click.stop="emit('open', g.code)"
+                @dblclick.stop="emit('openPage', g.code)"
+              >
                 <p class="truncate text-sm font-medium text-text">
                   {{ g.name }}
                   <span class="ml-1 font-mono text-xs text-text-tertiary">{{ g.code }}</span>
@@ -299,6 +313,10 @@ const fundGroups = computed<FundSummaryGroup[]>(() => {
               :row-key="(r) => `${r.date}-${r.action}-${r.quantity}-${r.price}`"
               :min-width="'720px'"
               scroll-class="table-scroll-sm"
+              row-clickable
+              enable-dblclick-nav
+              @row-click="(r) => emit('open', r.code)"
+              @row-dblclick="(r) => emit('openPage', r.code)"
             >
               <template #action="{ row }">
                 <span
@@ -333,7 +351,9 @@ const fundGroups = computed<FundSummaryGroup[]>(() => {
           :rows="fundTrades"
           :row-key="(r) => `${r.date}-${r.code}-${r.action}-${r.amount}-${r.shares}`"
           :min-width="'640px'"
-          :footer-text="'按月查询；同六元组重复行已在解析层去重'"
+          row-clickable
+          :footer-text="'按月查询；同六元组重复行已在解析层去重 · 单击打开基金侧栏'"
+          @row-click="(r) => emit('open', r.code)"
         >
           <template #name="{ row }">
             <span class="font-medium text-text">{{ row.name }}</span>
@@ -370,7 +390,11 @@ const fundGroups = computed<FundSummaryGroup[]>(() => {
                 class="shrink-0 text-text-tertiary transition-transform"
                 :class="expanded.has(g.code) ? 'rotate-90' : ''"
               />
-              <div class="min-w-0 flex-1">
+              <div
+                class="min-w-0 flex-1 cursor-pointer"
+                title="单击打开基金侧栏 · 行其他位置展开明细"
+                @click.stop="emit('open', g.code)"
+              >
                 <p class="truncate text-sm font-medium text-text">
                   {{ g.name }}
                   <span class="ml-1 font-mono text-xs text-text-tertiary">{{ g.code }}</span>
@@ -391,6 +415,8 @@ const fundGroups = computed<FundSummaryGroup[]>(() => {
               :row-key="(r) => `${r.date}-${r.action}-${r.amount}-${r.shares}`"
               :min-width="'560px'"
               scroll-class="table-scroll-sm"
+              row-clickable
+              @row-click="(r) => emit('open', r.code)"
             >
               <template #action="{ row }">
                 <span class="rounded-full bg-flat-weak px-2 py-0.5 text-xs text-text-secondary">{{ row.action }}</span>
