@@ -36,6 +36,8 @@ tauri-plugin-autostart = "2"
 tauri-plugin-sql = { version = "2", features = ["sqlite"] }
 tauri-plugin-fs = "2"
 tauri-plugin-dialog = "2"
+# tzzb_loopback 的 OAuth 回环监听（async command 跑在 tauri 内置 tokio runtime 上）
+tokio = { version = "1", features = ["net", "io-util", "time"] }
 
 # 触控板三指手势（最大化 / 最小化）兼容层：WM_SYSCOMMAND 子类化，见 src/window_syscmd.rs；
 # 同一子类化层还负责拖拽 / 激活后把焦点还给 WebView2（键盘事件恢复）
