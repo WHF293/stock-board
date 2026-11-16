@@ -34,10 +34,26 @@ export const KLINE_CACHE_PERIODS: readonly SinaKlinePeriod[] = ['daily'];
  * 与库中水位记录不一致时整票作废重取 —— 避免换源 / 换复权口径后，
  * 新旧价格混在同一条 K 线序列里（那种图看起来正常，但全是错的）。
  *
- * 2026-11-02 起 A 股日 K 切换腾讯源前复权（tencent-kline.api.ts）：
- * 由 'sina-none' 改此常量即触发存量新浪不复权缓存全量作废，无需手动清库。
+ * 2026-11-02 起 A 股日 K 切换腾讯源前复权（tencent-kline.api.ts）。
+ * 2026-11-16 补充 `tencent-none`：腾讯对**指数 / 无除权记录标的**只下发原始键
+ * `day`（价格即原始价，无前复权序列），这类票的真实口径是不复权，必须单独记一种，
+ * 否则「某天上游补了 qfq 序列」这种口径切换会被误判为同源而混进同一条序列。
  */
-export const KLINE_CACHE_SOURCE = 'tencent-qfq';
+export const KLINE_CACHE_SOURCE_QFQ = 'tencent-qfq';
+
+/** 缓存口径：腾讯源原始价（指数 / 无除权记录标的，上游只下发 day 键） */
+export const KLINE_CACHE_SOURCE_NONE = 'tencent-none';
+
+/**
+ * 主源（腾讯）可接受的缓存口径集合
+ *
+ * 命中任一即视为「同源缓存」，不必因口径字符串不同而作废；旧版遗留的
+ * `sina-none`（不复权兜底源）不在其中，读到即作废重取。
+ */
+export const KLINE_CACHE_SOURCES: readonly string[] = [
+  KLINE_CACHE_SOURCE_QFQ,
+  KLINE_CACHE_SOURCE_NONE,
+];
 
 /**
  * 前复权口径漂移检测的相对阈值（重叠日收盘价相对差）

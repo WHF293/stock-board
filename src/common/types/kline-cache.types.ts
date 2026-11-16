@@ -37,7 +37,7 @@ export interface KlineCacheMeta {
   symbol: string;
   /** K 线周期 */
   period: SinaKlinePeriod;
-  /** 数据口径（来源 + 复权方式，见 KLINE_CACHE_SOURCE） */
+  /** 数据口径（来源 + 复权方式，见 KLINE_CACHE_SOURCES） */
   source: string;
   /** 库内最早 bar 的交易日（`YYYY-MM-DD`） */
   firstDate: string;

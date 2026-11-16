@@ -7,10 +7,11 @@ import BaseEmpty from '../ui/BaseEmpty.vue';
 import BaseSkeleton from '../ui/BaseSkeleton.vue';
 import BaseTabs from '../ui/BaseTabs.vue';
 import KlineChart from '../../../common/components/charts/KlineChart.vue';
+import KlineSourceBadge from '../../../common/components/charts/KlineSourceBadge.vue';
 import StockQuoteHeader from '../business/StockQuoteHeader.vue';
 import DockResizer from '../business/DockResizer.vue';
 import { fetchFullQuotes } from '../../../common/api/quotes.api.ts';
-import { fetchKlineCached } from '../../../common/api/kline-cache.api.ts';
+import { fetchKlineSeries } from '../../../common/api/kline-cache.api.ts';
 import { listTradeRecordsBySymbol } from '../../../common/api/account-records-db.api.ts';
 import type { AccountTradeRecord } from '../../../common/types/account.types.ts';
 import {
@@ -29,6 +30,7 @@ import { useChartPeriod } from '../../../common/composables/use-chart-period';
 import { useCrosshairQuote } from '../../../common/composables/use-crosshair-quote';
 import { POLLING_INTERVAL } from '../../../common/constants/polling.constants.ts';
 import type { KLineData } from 'klinecharts';
+import type { KlineSeries } from '../../../common/types/kline.types.ts';
 import type { FullQuote } from '../../../common/types/stock-quote.types.ts';
 import { toFullSymbol } from '../../../common/utils/to-full-symbol';
 import { useDataCacheStore } from '../../../common/stores/data-cache';
@@ -125,12 +127,16 @@ watch(liveBar, (bar) => {
   klines.value = mergeKlineBars(klines.value, [bar]);
 });
 
-/** K 线快照键（符号 + 周期，不复权无口径差异） */
+/** K 线快照键（符号 + 周期；快照值含序列与数据来源口径，与详情整页互通） */
 const klineCacheKey = computed(
   () => `${DATA_CACHE_KEY.DETAIL_KLINE_PREFIX}${symbol.value}.${chartPeriod.value}`,
 );
 
-const klines = ref<KLineData[]>(dataCache.get<KLineData[]>(klineCacheKey.value) ?? []);
+/** 快照播种：同符号同周期先前拉取过则标签与图表一起秒出 */
+const klineSnapshot = dataCache.get<KlineSeries>(klineCacheKey.value);
+
+const klines = ref<KLineData[]>(klineSnapshot?.bars ?? []);
+const klineSeries = ref<KlineSeries | null>(klineSnapshot);
 const isKlineLoading = ref(klines.value.length === 0);
 const klineError = ref(false);
 
@@ -139,18 +145,21 @@ const loadKline = async (): Promise<void> => {
   klineError.value = false;
   try {
     // 快照播种：同符号同周期先前拉取过则秒出
-    const cachedBars = dataCache.get<KLineData[]>(klineCacheKey.value);
-    if (cachedBars) {
-      klines.value = cachedBars;
+    const cachedSeries = dataCache.get<KlineSeries>(klineCacheKey.value);
+    if (cachedSeries) {
+      klines.value = cachedSeries.bars;
+      klineSeries.value = cachedSeries;
       isKlineLoading.value = false;
     }
-    // 日 K 走本地缓存（首次全量落库，之后只补缺口）；分时等周期退回纯网络取数
-    const bars = await fetchKlineCached(symbol.value, chartPeriod.value);
-    klines.value = bars;
+    // 日 K 走本地缓存（首次全量落库，之后只补缺口）；分时等周期退回纯网络取数。
+    // 返回体带数据来源 / 复权口径，供卡片底部标注（腾讯失败会自动切新浪兜底）
+    const series = await fetchKlineSeries(symbol.value, chartPeriod.value);
+    klines.value = series.bars;
+    klineSeries.value = series;
     applyTodayBar();
-    dataCache.set(klineCacheKey.value, bars);
+    dataCache.set(klineCacheKey.value, series);
   } catch (error) {
-    // 失败保留上一次成功数据（首次失败则展示空态）
+    // 失败保留上一次成功数据（首次失败则展示空态；标注随旧数据保留，不乱改口径）
     klineError.value = klines.value.length === 0;
     console.error('[stock-detail] kline', error);
   } finally {
@@ -311,6 +320,10 @@ const detailSections = computed(() => pluginKernel.contributions.stockDetail.sec
           <BaseEmpty text="K 线数据加载失败，请稍后重试（上游可能限频，稍后自动恢复）" />
         </div>
         <BaseSkeleton v-else />
+        <!-- 数据来源与复权口径标注（腾讯失败切新浪兜底时会显式标「兜底源」） -->
+        <div v-if="klines.length > 0" class="mt-1 flex justify-end">
+          <KlineSourceBadge :series="klineSeries" />
+        </div>
       </BaseCard>
     </div>
 

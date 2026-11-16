@@ -1,5 +1,6 @@
 import dayjs from 'dayjs';
 import type { KLineData } from 'klinecharts';
+import type { KlineAdjustMode } from '../types/kline.types.ts';
 import { proxyFetch } from './proxy-fetch';
 import type { SinaKlineFetchOptions, SinaKlinePeriod } from './sina-kline.api.ts';
 
@@ -17,7 +18,8 @@ import type { SinaKlineFetchOptions, SinaKlinePeriod } from './sina-kline.api.ts
  * - week 400 / month 200 可用；month 前复权早年价格可能为负（除权缩放固有现象，
  *   如茅台 2010 年为 -191），如实展示不做修饰；
  * - 响应键 `qfqday` / `qfqweek` / `qfqmonth`（与港股 hkfqkline 一致），数组外另有
- *   `market` 行情状态块，按键取数组即可；
+ *   `market` 行情状态块，按键取数组即可；**指数 / 无除权记录标的只下发 `day`
+ *   （原始价），必须回落 rawKey**，否则整张图加载失败（见 fetchTencentKlineSeries）；
  * - 行结构 10 列：`[日期, 开, 收, 高, 低, 量(手), {}, 涨跌幅, 额(万), 保留位]`
  *   （比港股多一个尾部保留位，下标 0-8 与港股一致）。
  *
@@ -37,11 +39,11 @@ const TENCENT_KLINE_BAR_COUNT = {
   monthly: 200,
 } as const;
 
-/** 周期 → 上游 param 周期参数与响应数据键（day/qfqday 形态） */
+/** 周期 → 上游 param 周期参数与响应数据键（有复权序列用 qfq 键，无则回落原始键） */
 const TENCENT_KLINE_PERIOD_PARAM = {
-  daily: { param: 'day', dataKey: 'qfqday' },
-  weekly: { param: 'week', dataKey: 'qfqweek' },
-  monthly: { param: 'month', dataKey: 'qfqmonth' },
+  daily: { param: 'day', qfqKey: 'qfqday', rawKey: 'day' },
+  weekly: { param: 'week', qfqKey: 'qfqweek', rawKey: 'week' },
+  monthly: { param: 'month', qfqKey: 'qfqmonth', rawKey: 'month' },
 } as const;
 
 /** 腾讯日 / 周 / 月 K 行：[日期, 开, 收, 高, 低, 量(手), 扩展对象, 涨跌幅, 额(万), 保留位] */
@@ -104,22 +106,26 @@ export const fetchTencentRawDailyCloses = async (symbol: string): Promise<Map<st
 };
 
 /**
- * 拉取 A 股日 / 周 / 月 K（腾讯 qfq 前复权）
+ * 拉取 A 股日 / 周 / 月 K（腾讯源，含复权口径）
  *
- * barLimit 与新浪源共用调用约定：仅用于收窄单次请求根数（缓存层补尾部场景），
- * 会被各周期上限收敛
+ * **响应键回落是必须的**（2026-11-16 实测，再次确认 2026-09-14 的结论）：
+ * 腾讯只在标的**有除权除息记录**时才下发 `qfqday / qfqweek / qfqmonth`；
+ * 指数（sh000001、sz399001）、无分红除权的个股（如 sh688981）、次新股等
+ * 一律只返回原始键 `day / week / month` —— 此前只读 qfq 键导致这些票
+ * 「上游 200 但序列为空」而整张图加载失败。回落原始键时价格即原始价，
+ * 复权口径如实回报 `none`。
  * @param symbol 完整符号（sh600519 形态，腾讯接口直接可用）
  * @param period K 线周期（仅 daily / weekly / monthly；分钟级走新浪源）
  * @param options 可选请求参数（见 SinaKlineFetchOptions）
- * @returns klinecharts KLineData 序列（时间升序，volume=股、turnover=元）
- * @throws 上游请求失败 / 响应 code 非 0（含 param error）/ 数据为空时抛错
+ * @returns 序列 + 实际复权口径（source 恒为腾讯，兜底切换由 kline-cache 层负责）
+ * @throws 上游请求失败 / 响应 code 非 0（含 param error）/ 两个键都为空时抛错
  */
-export const fetchTencentKline = async (
+export const fetchTencentKlineSeries = async (
   symbol: string,
   period: Extract<SinaKlinePeriod, 'daily' | 'weekly' | 'monthly'>,
   options?: SinaKlineFetchOptions,
-): Promise<KLineData[]> => {
-  const { param, dataKey } = TENCENT_KLINE_PERIOD_PARAM[period];
+): Promise<{ bars: KLineData[]; adjust: KlineAdjustMode }> => {
+  const { param, qfqKey, rawKey } = TENCENT_KLINE_PERIOD_PARAM[period];
   const maxBars = TENCENT_KLINE_BAR_COUNT[period];
   const requestBars = Math.min(Math.max(options?.barLimit ?? maxBars, 1), maxBars);
   // param 五段形态与 curl 实测一致：symbol,period,起,止,根数,qfq（起止留空 = 最近 N 根）
@@ -138,11 +144,15 @@ export const fetchTencentKline = async (
   if (parsed.code !== 0) {
     throw new Error(`腾讯 K 线上游返回异常：${parsed.msg || parsed.code}`);
   }
-  const rows = parsed.data[symbol]?.[dataKey] ?? [];
+  const node = parsed.data[symbol];
+  // 有复权序列用 qfq 键（前复权）；无复权序列的标的只有原始键（价格即原始价）
+  const qfqRows = node?.[qfqKey];
+  const useQfq = Array.isArray(qfqRows) && qfqRows.length > 0;
+  const rows = useQfq ? qfqRows : (node?.[rawKey] ?? []);
   if (rows.length === 0) {
     throw new Error(`腾讯 K 线无数据（${symbol} ${period}，上游 200 但序列为空）`);
   }
-  return rows
+  const bars = rows
     .map((row): KLineData | null => {
       const timestamp = dayjs(row[0].replace(/-/g, '/')).valueOf();
       if (!Number.isFinite(timestamp)) return null;
@@ -157,4 +167,25 @@ export const fetchTencentKline = async (
       } satisfies KLineData;
     })
     .filter((bar): bar is KLineData => bar !== null && bar.open > 0);
+  return { bars, adjust: useQfq ? 'qfq' : 'none' };
+};
+
+/**
+ * 拉取 A 股日 / 周 / 月 K 序列（腾讯源，仅要序列的调用方用）
+ *
+ * barLimit 与新浪源共用调用约定：仅用于收窄单次请求根数（缓存层补尾部场景），
+ * 会被各周期上限收敛
+ * @param symbol 完整符号（sh600519 形态，腾讯接口直接可用）
+ * @param period K 线周期（仅 daily / weekly / monthly；分钟级走新浪源）
+ * @param options 可选请求参数（见 SinaKlineFetchOptions）
+ * @returns klinecharts KLineData 序列（时间升序，volume=股、turnover=元）
+ * @throws 上游请求失败 / 响应 code 非 0（含 param error）/ 数据为空时抛错
+ */
+export const fetchTencentKline = async (
+  symbol: string,
+  period: Extract<SinaKlinePeriod, 'daily' | 'weekly' | 'monthly'>,
+  options?: SinaKlineFetchOptions,
+): Promise<KLineData[]> => {
+  const { bars } = await fetchTencentKlineSeries(symbol, period, options);
+  return bars;
 };
