@@ -8,6 +8,7 @@ import { toFullSymbol } from '../../common/utils/to-full-symbol';
 import { buildStockAnalysisPrompt } from '../../common/utils/build-stock-analysis-prompt';
 import { requestAgentAnalysis } from '../agent/agent-bridge';
 import type { FullQuote } from '../../common/types/stock-quote.types.ts';
+import type { KlineSeries } from '../../common/types/kline.types.ts';
 import BaseButton from '../components/ui/BaseButton.vue';
 import BaseCard from '../components/ui/BaseCard.vue';
 import BaseConfirmModal from '../components/ui/BaseConfirmModal.vue';
@@ -22,6 +23,7 @@ import { HOST_HEADER_ITEM } from '../../common/constants/header.constants.ts';
 import { formatPercent } from '../../common/utils/format-percent';
 import { formatPrice } from '../../common/utils/format-price';
 import KlineChart from '../../common/components/charts/KlineChart.vue';
+import KlineSourceBadge from '../../common/components/charts/KlineSourceBadge.vue';
 import { useKlineDrawing } from '../../common/composables/use-kline-drawing';
 import { useKlineLive } from '../../common/composables/use-kline-live';
 import { KLINE_DRAWING_SHAPES } from '../../common/constants/kline-drawing.constants.ts';
@@ -31,7 +33,7 @@ import StockOrderBook from '../components/business/StockOrderBook.vue';
 import ChipDistributionCard from '../components/business/ChipDistributionCard.vue';
 import { useDockPanelStore } from '../../common/stores/dock-panel';
 import { fetchFullQuotes } from '../../common/api/quotes.api.ts';
-import { fetchKlineCached } from '../../common/api/kline-cache.api.ts';
+import { fetchKlineSeries } from '../../common/api/kline-cache.api.ts';
 import { listTradeRecordsBySymbol } from '../../common/api/account-records-db.api.ts';
 import type { AccountTradeRecord } from '../../common/types/account.types.ts';
 import {
@@ -211,12 +213,16 @@ const onDrawingAction = (action: () => void): void => {
   drawingMenuOpen.value = false;
 };
 
-/** K 线快照键（符号 + 周期；前复权口径下盘中同票同周期数据一致，与侧栏互通） */
+/** K 线快照键（符号 + 周期；快照值含序列与数据来源口径，与侧栏互通） */
 const klineCacheKey = computed(
   () => `${DATA_CACHE_KEY.DETAIL_KLINE_PREFIX}${symbol.value}.${chartPeriod.value}`,
 );
 
-const klines = ref<KLineData[]>(dataCache.get<KLineData[]>(klineCacheKey.value) ?? []);
+/** 快照播种：同符号同周期先前拉取过则标签与图表一起秒出 */
+const klineSnapshot = dataCache.get<KlineSeries>(klineCacheKey.value);
+
+const klines = ref<KLineData[]>(klineSnapshot?.bars ?? []);
+const klineSeries = ref<KlineSeries | null>(klineSnapshot);
 const isKlineLoading = ref(klines.value.length === 0);
 const klineError = ref(false);
 
@@ -225,18 +231,21 @@ const loadKline = async (): Promise<void> => {
   klineError.value = false;
   try {
     // 快照播种：同符号同周期先前拉取过则秒出
-    const cachedBars = dataCache.get<KLineData[]>(klineCacheKey.value);
-    if (cachedBars) {
-      klines.value = cachedBars;
+    const cachedSeries = dataCache.get<KlineSeries>(klineCacheKey.value);
+    if (cachedSeries) {
+      klines.value = cachedSeries.bars;
+      klineSeries.value = cachedSeries;
       isKlineLoading.value = false;
     }
-    // 日 K 走本地缓存（首次全量落库，之后只补缺口）；分时等周期退回纯网络取数
-    const bars = await fetchKlineCached(symbol.value, chartPeriod.value);
-    klines.value = bars;
+    // 日 K 走本地缓存（首次全量落库，之后只补缺口）；分时等周期退回纯网络取数。
+    // 返回体带数据来源 / 复权口径，供卡片底部标注（腾讯失败会自动切新浪兜底）
+    const series = await fetchKlineSeries(symbol.value, chartPeriod.value);
+    klines.value = series.bars;
+    klineSeries.value = series;
     applyTodayBar();
-    dataCache.set(klineCacheKey.value, bars);
+    dataCache.set(klineCacheKey.value, series);
   } catch (error) {
-    // 失败保留上一次成功数据（首次失败则展示空态）
+    // 失败保留上一次成功数据（首次失败则展示空态；标注随旧数据保留，不乱改口径）
     klineError.value = klines.value.length === 0;
     console.error('[stock-detail-page] kline', error);
   } finally {
@@ -708,6 +717,10 @@ const pctClass = (value: number | null): string =>
             </button>
           </div>
         </template>
+        <!-- 数据来源与复权口径标注（图表上方右对齐；腾讯失败切新浪兜底时标「兜底源」） -->
+        <div class="mb-1 flex shrink-0 justify-end">
+          <KlineSourceBadge :series="klineSeries" />
+        </div>
         <div class="min-h-0 min-w-0 flex-1">
           <div v-if="klineError" class="py-10">
             <BaseEmpty text="K 线数据加载失败，请稍后重试（上游可能限频，稍后自动恢复）" />

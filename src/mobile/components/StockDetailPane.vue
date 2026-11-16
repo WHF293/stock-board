@@ -12,16 +12,18 @@
  */
 import { computed, ref, watch } from 'vue';
 import { fetchFullQuotes } from '../../common/api/quotes.api';
-import { fetchKlineCached } from '../../common/api/kline-cache.api';
+import { fetchKlineSeries } from '../../common/api/kline-cache.api';
 import type { SinaKlinePeriod } from '../../common/api/sina-kline.api';
 import {
   CHART_PERIOD_OPTIONS,
   CHART_PERIOD_DEFAULT,
 } from '../../common/constants/stock-detail.constants';
 import type { KLineData } from 'klinecharts';
+import type { KlineSeries } from '../../common/types/kline.types';
 import type { FullQuote } from 'stock-sdk';
 import { isHkSymbol } from '../../common/utils/is-hk-symbol';
 import KlineChart from '../../common/components/charts/KlineChart.vue';
+import KlineSourceBadge from '../../common/components/charts/KlineSourceBadge.vue';
 import { pctClass } from '../utils/format';
 
 const props = defineProps<{
@@ -89,6 +91,8 @@ const headGrid = computed(() => {
 /* === K 线 === */
 const period = ref<SinaKlinePeriod>(CHART_PERIOD_DEFAULT);
 const bars = ref<KLineData[]>([]);
+/** 本次取数的数据来源与复权口径（图表下方标注用；腾讯失败切新浪时为不复权 + 兜底源） */
+const klineSeries = ref<KlineSeries | null>(null);
 const klineLoading = ref(false);
 const klineError = ref(false);
 
@@ -102,8 +106,11 @@ const loadKline = async (): Promise<void> => {
   klineLoading.value = true;
   klineError.value = false;
   bars.value = [];
+  klineSeries.value = null;
   try {
-    bars.value = await fetchKlineCached(props.symbol, period.value);
+    const series = await fetchKlineSeries(props.symbol, period.value);
+    bars.value = series.bars;
+    klineSeries.value = series;
   } catch (error) {
     // 真机排查入口：K 线失败留原始报错（含通道 / 缓存层信息），否则窗格无从定位
     console.error('[stock-detail-pane] K 线加载失败', error);
@@ -219,6 +226,10 @@ watch(period, () => void loadKline());
             :market="symbolMarket"
             auto-height
           />
+        </div>
+        <!-- 数据来源与复权口径标注（腾讯失败切新浪兜底时标「兜底源」） -->
+        <div v-if="bars.length" class="flex justify-end pt-1">
+          <KlineSourceBadge :series="klineSeries" />
         </div>
       </div>
 

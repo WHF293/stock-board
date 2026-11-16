@@ -15,9 +15,11 @@ import { useRoute, useRouter } from 'vue-router';
 import { showToast } from 'vant';
 import { useWatchlistStore } from '../../common/stores/watchlist';
 import KlineChart from '../../common/components/charts/KlineChart.vue';
+import KlineSourceBadge from '../../common/components/charts/KlineSourceBadge.vue';
 import type { KLineData } from 'klinecharts';
+import type { KlineSeries } from '../../common/types/kline.types';
 import { fetchFullQuotes } from '../../common/api/quotes.api';
-import { fetchKlineCached } from '../../common/api/kline-cache.api';
+import { fetchKlineSeries } from '../../common/api/kline-cache.api';
 import type { SinaKlinePeriod } from '../../common/api/sina-kline.api';
 import {
   CHART_PERIOD_OPTIONS,
@@ -101,6 +103,8 @@ const headGrid = computed(() => {
 /* === K 线 === */
 const period = ref<SinaKlinePeriod>(CHART_PERIOD_DEFAULT);
 const bars = ref<KLineData[]>([]);
+/** 本次取数的数据来源与复权口径（图表下方标注用；腾讯失败切新浪时为不复权 + 兜底源） */
+const klineSeries = ref<KlineSeries | null>(null);
 const klineLoading = ref(false);
 const klineError = ref(false);
 
@@ -114,9 +118,13 @@ const loadKline = async (): Promise<void> => {
   klineLoading.value = true;
   klineError.value = false;
   bars.value = [];
+  klineSeries.value = null;
   try {
-    // 不传 barLimit，与 PC 同口径（分时需全天 ~242 根、五日需 5×242 根，120 会截掉上午盘）
-    bars.value = await fetchKlineCached(symbol.value, period.value);
+    // 不传 barLimit，与 PC 同口径（分时需全天 ~242 根、五日需 5×242 根，120 会截掉上午盘）；
+    // 返回体带数据来源 / 复权口径，供图表下方标注（腾讯失败会自动切新浪兜底）
+    const series = await fetchKlineSeries(symbol.value, period.value);
+    bars.value = series.bars;
+    klineSeries.value = series;
   } catch {
     klineError.value = true;
   } finally {
@@ -397,6 +405,10 @@ const pluginSections = computed(
                   :market="symbolMarket"
                   auto-height
                 />
+              </div>
+              <!-- 数据来源与复权口径标注（腾讯失败切新浪兜底时标「兜底源」） -->
+              <div v-if="bars.length" class="flex justify-end pt-1">
+                <KlineSourceBadge :series="klineSeries" />
               </div>
             </div>
 

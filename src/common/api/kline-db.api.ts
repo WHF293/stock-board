@@ -309,7 +309,7 @@ export const countKlineCache = async (): Promise<{ symbols: number; bars: number
 /**
  * 清空全部本地 K 线缓存（明细表 + 水位表）
  *
- * 设置页的手动兜底：正常情况下口径变更由 KLINE_CACHE_SOURCE 自动作废，
+ * 设置页的手动兜底：正常情况下口径变更由 KLINE_CACHE_SOURCES 自动作废，
  * 但用户换过数据源 / 想强制重取时需要一个不留死角的入口。
  */
 export const clearAllKlineCache = async (): Promise<void> => {
