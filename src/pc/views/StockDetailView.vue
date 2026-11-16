@@ -739,6 +739,7 @@ const pctClass = (value: number | null): string =>
             :intraday-axis="chartPeriod === 'minute'"
             :market="symbolMarket"
             :trade-marks="chartTradeMarks"
+            :limit-mark="chartPeriod === 'daily'"
             auto-height
             @crosshair-bar="onCrosshairBar"
           />

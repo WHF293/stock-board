@@ -224,6 +224,7 @@ watch(period, () => void loadKline());
             :symbol="symbol"
             :intraday-axis="period === 'minute'"
             :market="symbolMarket"
+            :limit-mark="period === 'daily'"
             auto-height
           />
         </div>
