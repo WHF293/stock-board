@@ -403,6 +403,7 @@ const pluginSections = computed(
                   :symbol="symbol"
                   :intraday-axis="period === 'minute'"
                   :market="symbolMarket"
+                  :limit-mark="period === 'daily'"
                   auto-height
                 />
               </div>

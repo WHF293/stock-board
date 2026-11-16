@@ -41,6 +41,8 @@ import { readTrendColors } from '../../utils/trend-colors';
 import { useTheme } from '../../composables/use-theme';
 import { useSettingsStore } from '../../stores/settings';
 import { isIndexSymbol } from '../../utils/normalize-a-share-code';
+import { getDailyLimitRatio } from '../../utils/daily-limit-ratio';
+import { LIMIT_MARK_INDICATOR } from '../../constants/limit-mark.constants.ts';
 import type { TradeMark } from '../../utils/trade-marks';
 import {
   INTRADAY_MACD_INDICATOR,
@@ -114,6 +116,12 @@ const props = defineProps<{
   market?: MinuteAxisMarket;
   /** 成交 BS/T 标注点（时间升序）；数据或标注变化时吸附最近 bar 重建覆盖物 */
   tradeMarks?: TradeMark[];
+  /**
+   * 是否标记涨跌停蜡烛（涨停整根黄柱 / 跌停整根灰柱，王总 2026-11-16 指定）。
+   * 仅日 K 口径有意义：周/月 K 的单根涨跌幅不是当日涨跌停概念，
+   * 由调用方按「周期 === 日 K」传入；timeline 分时模式忽略
+   */
+  limitMark?: boolean;
   /**
    * 盘中实时最后一根柱（2026-11-02 王总指定：轮询分时接口构建，见 use-kline-live）。
    * 经 loader subscribeBar 通道推送：时间戳相同覆盖最后一根 / 更大追加，
@@ -675,6 +683,28 @@ const setupIndicators = (chart: Chart): void => {
   for (const name of sub) {
     chart.createIndicator(name);
   }
+  syncLimitMarkIndicator(chart);
+};
+
+/**
+ * 同步涨跌停蜡烛覆盖指标（LIMIT_MARK，涨停黄柱 / 跌停灰柱）
+ *
+ * 无状态实现：先按 name+paneId 移除再按需创建，避免与 removeIndicator({})
+ * 的全量重建路径之间维护布尔标记出错。涨跌停幅度经 calcParams 下发，
+ * symbol 变化时重新走一遍同步即可（幅度变了 shouldUpdate 判 calcParams 变化触发重算）。
+ * 仅蜡烛模式生效；symbol 缺失 / 指数 / 基金 / 港美股（幅度为 0）不挂载
+ * @param chart klinecharts 实例
+ */
+const syncLimitMarkIndicator = (chart: Chart): void => {
+  const ratio = props.limitMark ? getDailyLimitRatio(props.symbol) : 0;
+  chart.removeIndicator({ name: LIMIT_MARK_INDICATOR, paneId: CANDLE_PANE_ID });
+  if (ratio > 0) {
+    // isStack=true：主图上已有 MA 等指标，不能走默认「清空面板重建」路径
+    chart.createIndicator(
+      { name: LIMIT_MARK_INDICATOR, paneId: CANDLE_PANE_ID, calcParams: [ratio] },
+      true,
+    );
+  }
 };
 
 /**
@@ -827,6 +857,9 @@ const resolveMarkSide = (mark: TradeMark, refPrice: number): TradePointExtend['s
  * 锚点 value：分时/五日用当分钟涨跌幅（displayBars 已换算的 close），
  * 蜡烛模式向下锚 bar.low / 向上锚 bar.high；
  * 圆点 + 连接线 + 圆角徽标的绘制在覆盖物 createPointFigures 里做（像素级）。
+ *
+ * 覆盖物一律 `lock: true`：标注位置完全由成交记录时间 + 基准价推导，
+ * 不允许被鼠标拖到别的时间点 / 价位（曾经可拖，拖完图就与成交事实对不上了）。
  */
 const rebuildTradeOverlays = (): void => {
   const chart = chartRef.value;
@@ -844,6 +877,7 @@ const rebuildTradeOverlays = (): void => {
     name: string;
     points: { timestamp?: number; value?: number }[];
     extendData: TradePointExtend;
+    lock: boolean;
   }[] = [];
   for (const mark of marks) {
     const index = snapBarIndex(bars, mark.timestamp);
@@ -860,6 +894,11 @@ const rebuildTradeOverlays = (): void => {
       name: TRADE_POINT_OVERLAY,
       points: [{ timestamp: bar.timestamp, value }],
       extendData: { type: mark.type, side },
+      // 成交标注是「事实」而非可用鼠标摆布的图形：lock=true 后 klinecharts 不再对该
+      // 覆盖物派发任何鼠标事件（_figureMouseDownEvent 直接 return false），
+      // 位置只能由 mark.timestamp / 基准价推导，无法被拖拽到别的时间点或价位。
+      // 重建链路走 removeOverlay({ name }) + createOverlay，不受 lock 影响。
+      lock: true,
     });
   }
   if (creates.length > 0) {
@@ -1118,6 +1157,17 @@ watch(
   () => props.tradeMarks,
   () => {
     rebuildTradeOverlays();
+  },
+);
+
+// 标的 / 涨跌停标记开关变化（停靠面板原地换股不重建组件）：重挂 LIMIT_MARK
+// （幅度经 calcParams 下发，重新同步即可；蜡烛模式之外本就不挂载，重复同步无害）
+watch(
+  () => [props.symbol, props.limitMark] as const,
+  () => {
+    const chart = chartRef.value;
+    if (!chart || props.mode === 'timeline') return;
+    syncLimitMarkIndicator(chart);
   },
 );
 

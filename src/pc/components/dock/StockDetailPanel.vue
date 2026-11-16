@@ -305,6 +305,7 @@ const detailSections = computed(() => pluginKernel.contributions.stockDetail.sec
             :intraday-axis="chartPeriod === 'minute'"
             :market="symbolMarket"
             :trade-marks="chartTradeMarks"
+            :limit-mark="chartPeriod === 'daily'"
             sub-volume-only
             :resize-tick="chartResizeTick"
             @crosshair-bar="onCrosshairBar"

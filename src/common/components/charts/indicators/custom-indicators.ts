@@ -1,5 +1,12 @@
 import { registerIndicator, type IndicatorTemplate, type KLineData } from 'klinecharts';
 import { readTrendColors } from '../../../../common/utils/trend-colors';
+import {
+  LIMIT_DOWN_BAR_COLOR,
+  LIMIT_MARK_INDICATOR,
+  LIMIT_RATIO_MAIN_BOARD,
+  LIMIT_UP_BAR_COLOR,
+} from '../../../../common/constants/limit-mark.constants.ts';
+import { limitCloseType } from '../../../../common/utils/limit-close-type.ts';
 
 /**
  * 自定义指标注册：MACD&KDJ 复合副图（含买/卖汉字标注）与分时均价线
@@ -165,3 +172,75 @@ const AVG_PRICE_TEMPLATE: IndicatorTemplate<{ avg: number | null }> = {
 
 registerIndicator(MACD_KDJ_TEMPLATE);
 registerIndicator(AVG_PRICE_TEMPLATE);
+
+/** 涨跌停标记单根 K 线的计算结果 */
+interface LimitMarkResult {
+  /**
+   * 涨跌停收盘价：涨停 / 跌停 = 该 bar 收盘价，否则 null。
+   * figure 只在 key 值通过 isValid（非 null/undefined）时才装配绘制，
+   * 且轴 range 只扫 figure key 的 isNumber 字段——
+   * 非涨跌停 bar 因此既不绘制也不影响价格轴
+   */
+  limit: number | null;
+  /** 涨停=1 / 跌停=0 / 非涨跌停=0（覆盖矩形配色用；非 figure key，不影响轴 range） */
+  up: number;
+  /** 该 bar 最高价（整根覆盖矩形上沿，直接经 yAxis.convertToPixel 换算） */
+  high: number;
+  /** 该 bar 最低价（整根覆盖矩形下沿） */
+  low: number;
+}
+
+/**
+ * 涨跌停蜡烛覆盖指标模板（仅日 K 蜡烛模式，KlineChart 按 limitMark + symbol 决定挂载）
+ *
+ * 涨停 → 整根蜡烛覆盖黄色矩形、跌停 → 灰色矩形（王总 2026-11-16 指定）；
+ * 矩形从 high 画到 low、宽度与蜡烛体一致（gapBar），画在蜡烛之后（指标层在蜡烛层上方），
+ * 视觉上等于把该根蜡烛整体换色。判定口径见 utils/limit-close-type.ts。
+ * 涨跌停幅度经 calcParams 下发（symbol 变化时 overrideIndicator 改 calcParams 触发重算，
+ * 默认 shouldUpdate 对 calcParams 变化返回 true），不放进 extendData（extendData 变化不触发重算）
+ */
+const LIMIT_MARK_TEMPLATE: IndicatorTemplate<LimitMarkResult, number> = {
+  name: LIMIT_MARK_INDICATOR,
+  // 不参与指标设置弹窗（选项清单在 stock-indicator.constants.ts，宿主内置）
+  shortName: '涨跌停',
+  series: 'normal',
+  precision: 2,
+  calcParams: [LIMIT_RATIO_MAIN_BOARD],
+  figures: [
+    {
+      key: 'limit',
+      type: 'rect',
+      attrs: ({ data, coordinate, barSpace, yAxis }) => {
+        const cur = data.current;
+        if (!cur || cur.limit === null) return null;
+        const yHigh = yAxis.convertToPixel(cur.high);
+        const yLow = yAxis.convertToPixel(cur.low);
+        return {
+          x: coordinate.current.x - barSpace.halfGapBar,
+          y: Math.min(yHigh, yLow),
+          width: barSpace.gapBar,
+          height: Math.max(1, Math.abs(yLow - yHigh)),
+        };
+      },
+      styles: ({ data }) => ({
+        style: 'fill',
+        color: data.current?.up === 1 ? LIMIT_UP_BAR_COLOR : LIMIT_DOWN_BAR_COLOR,
+      }),
+    },
+  ],
+  calc: (dataList, indicator) => {
+    const ratio = indicator.calcParams[0] ?? 0;
+    return dataList.map((bar, i) => {
+      const prevClose = i > 0 ? dataList[i - 1].close : Number.NaN;
+      const type = limitCloseType(bar, prevClose, ratio);
+      return {
+        limit: type ? bar.close : null,
+        up: type === 'up' ? 1 : 0,
+        high: bar.high,
+        low: bar.low,
+      };
+    });
+  },
+};
+
+registerIndicator(LIMIT_MARK_TEMPLATE);
