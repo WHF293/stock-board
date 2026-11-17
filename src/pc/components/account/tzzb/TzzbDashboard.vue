@@ -39,6 +39,7 @@ import { fetchFullQuotes } from '../../../../common/api/quotes.api.ts';
 import { usePolling } from '../../../../common/composables/use-polling';
 import { POLLING_INTERVAL } from '../../../../common/constants/polling.constants.ts';
 import { buildTzzbHoldingSummary } from '../../../../common/utils/build-tzzb-holding-summary';
+import { replayTzzbHoldings } from '../../../../common/utils/replay-tzzb-holdings';
 import {
   fetchTzzbScopeSnapshot,
   TZZB_SNAPSHOT_TASK_TOTAL,
@@ -428,13 +429,24 @@ const holdingQuotes = ref<Record<string, FullQuote>>({});
 /** 全历史流水拉取中（首载骨架屏） */
 const holdingLoading = ref(false);
 
-/** 持仓与当日盈亏推算汇总（流水 / 行情任一更新即重算） */
+/**
+ * 流水回放持仓（只依赖 holdingTrades 的独立缓存层）
+ *
+ * 回放要排序 + 重放全历史几千条流水，而 holdingSummary 随行情轮询每个 tick 重算——
+ * 不拆开的话每个行情 tick 都白白重放一遍；行情 tick 只做 O(持仓数) 的行情合并
+ */
+const holdingReplay = computed(() =>
+  holdingTrades.value === null ? null : replayTzzbHoldings(holdingTrades.value),
+);
+
+/** 持仓与当日盈亏推算汇总（流水 / 行情任一更新即重算；回放结果复用上方缓存） */
 const holdingSummary = computed(() => {
-  if (holdingTrades.value === null) return null;
+  if (holdingTrades.value === null || holdingReplay.value === null) return null;
   return buildTzzbHoldingSummary(
     holdingTrades.value,
     holdingQuotes.value,
     dayjs().format('YYYY-MM-DD'),
+    holdingReplay.value,
   );
 });
 
@@ -449,15 +461,19 @@ const fetchHoldingQuotes = async (): Promise<void> => {
 };
 
 /**
- * 拉取持仓回放源流水：全历史接口优先（缓存命中秒回），失败回落摩擦账本的
- * 近 3 个月流水（缺早期仓位但当日盈亏仍可用）
+ * 拉取持仓回放源流水：持久化缓存命中秒回，后台校验拉到新流水经 onFresh 静默刷新；
+ * 持久化 / 内存缓存双未中才现场全量拉（大页 + 并行）；全历史接口失败回落摩擦账本
+ * 的近 3 个月流水（缺早期仓位但当日盈亏仍可用）
  */
 const refreshHoldingTrades = async (): Promise<void> => {
   if (holdingTrades.value === null) holdingLoading.value = true;
-  const full = await fetchTzzbHoldingTrades().catch(() => null);
+  const full = await fetchTzzbHoldingTrades((fresh) => {
+    holdingTrades.value = fresh;
+    // 持仓清单可能已变化：立即补一轮行情（不等下一拍轮询）
+    void fetchHoldingQuotes();
+  }).catch(() => null);
   holdingTrades.value = full ?? allStockTrades.value ?? [];
   holdingLoading.value = false;
-  // 持仓清单可能已变化：立即补一轮行情（不等下一拍轮询）
   void fetchHoldingQuotes();
 };
 

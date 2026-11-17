@@ -3,6 +3,7 @@ import type { TzzbHoldingRow, TzzbHoldingSummary } from '../types/tzzb-holding.t
 import type { TzzbStockTrade } from '../types/tzzb.types.ts';
 import { normalizeAShareCode } from './normalize-a-share-code';
 import { replayTzzbHoldings } from './replay-tzzb-holdings';
+import type { TzzbReplayPosition } from './replay-tzzb-holdings';
 import type { FullQuote } from '../types/stock-quote.types.ts';
 
 /**
@@ -59,14 +60,16 @@ const computeCodeDayPnl = (
  * @param trades 全历史股票流水（当前账户范围；仅当日流水也支持但持仓不含历史仓位）
  * @param quotes 实时报价映射（key 为 6 位纯代码，与 FullQuote.code 同形态）
  * @param today 当日日期（YYYY-MM-DD，与流水 date 同口径）
+ * @param replay 预计算的流水回放持仓（可选；调用方在行情轮询场景复用同一份回放，
+ * 避免每个行情 tick 都对全历史流水重放一遍——不传时内部自行计算）
  * @returns 持仓汇总（含行情轮询符号清单）
  */
 export const buildTzzbHoldingSummary = (
   trades: readonly TzzbStockTrade[],
   quotes: Readonly<Record<string, FullQuote>>,
   today: string,
+  replay: ReadonlyMap<string, TzzbReplayPosition> = replayTzzbHoldings(trades),
 ): TzzbHoldingSummary => {
-  const replay = replayTzzbHoldings(trades);
   const todayTrades = trades.filter((t) => t.date === today);
   const todayByCode = new Map<string, TzzbStockTrade[]>();
   for (const trade of todayTrades) {

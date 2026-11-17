@@ -3,7 +3,18 @@ import {
   TZZB_HOLDING_TRADE_FETCH_MAX_PAGES,
   TZZB_TRADE_FETCH_MAX_PAGES,
 } from '../types/tzzb.types.ts';
-import { TZZB_HOLDING_TRADE_START_DATE } from '../constants/tzzb-holding.constants.ts';
+import {
+  TZZB_HOLDING_TRADE_FETCH_CONCURRENCY,
+  TZZB_HOLDING_TRADE_PAGE_COUNT,
+  TZZB_HOLDING_TRADE_START_DATE,
+  TZZB_HOLDING_TRADES_CACHE_KEY,
+} from '../constants/tzzb-holding.constants.ts';
+import { mapWithConcurrency } from '../utils/map-with-concurrency.ts';
+import {
+  getTzzbHoldingLastTradeDateFromDb,
+  loadTzzbHoldingTradesFromDb,
+  saveTzzbHoldingTradesToDb,
+} from './tzzb-holding-db.api.ts';
 import {
   TZZB_INDEX_NAME,
   type TzzbAccount,
@@ -740,17 +751,19 @@ export const getTzzbFundHoldingReturns = async (): Promise<TzzbHoldingReturn[]> 
  * @param range 可选区间（缺省为近三个月，保持既有口径）
  * @param range.startDate 区间起始日 yyyyMMdd
  * @param range.endDate 区间结束日 yyyyMMdd
+ * @param count 每页条数（缺省 '20' 保持既有口径；持仓回放用大页减少往返）
  * @returns 分页流水；未配置代理 / 调用失败时返回 null
  */
 export const getTzzbStockTrades = async (
   page: string,
   range?: { startDate?: string; endDate?: string },
+  count = '20',
 ): Promise<TzzbStockTradePage | null> => {
   const keys = await ensureKeys();
   if (!keys) return null;
   const r = (await callTzzbTool('queryMoneyHistory', {
     page: String(page),
-    count: '20',
+    count: String(count),
     startDate: range?.startDate ?? dayjs().subtract(3, 'month').format('YYYYMMDD'),
     endDate: range?.endDate ?? dayjs().format('YYYYMMDD'),
     ...stockKeyArgs(keys),
@@ -812,37 +825,226 @@ export const getTzzbAllStockTrades = async (): Promise<TzzbStockTrade[]> => {
 /** 持仓回放全历史流水内存缓存（key 隐含账户范围：setTzzbAccountScope / 全量流水刷新时失效） */
 let holdingTradesCache: TzzbStockTrade[] | null = null;
 
+/** 后台增量校验单飞（stale-while-revalidate 期间防并发重复拉取） */
+let holdingTradesRevalidate: Promise<TzzbStockTrade[] | null> | null = null;
+
 /**
  * 失效持仓回放流水缓存（账户范围变化 / 全量流水重拉后由数据层自动触发；
- * 持仓面板下次取数重拉全历史）
+ * 持仓面板下次取数走本地持久层秒回 + 后台增量校验）
  */
 export const invalidateTzzbHoldingTradesCache = (): void => {
   holdingTradesCache = null;
 };
 
 /**
+ * 当前账户范围口径 key（SQLite 落库与 localStorage 降级缓存共用）
+ * @returns 'all' = 汇总 / 单账户 id / 多选 id 逗号拼接
+ */
+const holdingScopeKey = (): string =>
+  scopeAccountIds === null ? 'all' : scopeAccountIds.join(',');
+
+/**
+ * 持仓流水 localStorage 降级缓存 key（浏览器端 SQLite 不可用时用；跟随当前账户范围）
+ * @returns 带范围后缀的 localStorage key
+ */
+const holdingTradesStoreKey = (): string =>
+  `${TZZB_HOLDING_TRADES_CACHE_KEY}:${holdingScopeKey()}`;
+
+/**
+ * 读取持仓流水 localStorage 降级缓存（结构损坏 / 空列表一律丢弃）
+ * @returns 缓存的全历史流水；无有效缓存返回 null
+ */
+const readHoldingTradesLocalCache = (): TzzbStockTrade[] | null => {
+  try {
+    const raw = localStorage.getItem(holdingTradesStoreKey());
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { list?: TzzbStockTrade[] };
+    return Array.isArray(parsed?.list) && parsed.list.length > 0 ? parsed.list : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * 写持仓流水 localStorage 降级缓存（容量溢出等异常静默放弃——只影响下次启动秒开）
+ * @param list 全历史流水
+ */
+const writeHoldingTradesLocalCache = (list: TzzbStockTrade[]): void => {
+  try {
+    localStorage.setItem(holdingTradesStoreKey(), JSON.stringify({ list }));
+  } catch {
+    // localStorage 满或不可用：放弃持久化，内存缓存仍生效
+  }
+};
+
+/**
+ * 流水六元组去重（并行翻页期间上游新增成交会导致页间重复行；
+ * 与基金申赎流水去重同思路：日期+代码+操作+价格+数量+金额）
+ * @param list 合并后的流水（页序即入参顺序）
+ * @returns 去重后的流水（保持首次出现顺序）
+ */
+const dedupeHoldingTrades = (list: TzzbStockTrade[]): TzzbStockTrade[] => {
+  const seen = new Set<string>();
+  return list.filter((t) => {
+    const key = [t.date, t.code, t.action, t.price, t.quantity, t.amount].join('|');
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+};
+
+/**
+ * 拉取当前账户范围持仓回放流水（大页 + 余下页并行，页序确定性合并）
+ *
+ * 任一页失败即整体返回 null——中间缺页会让回放成本错位（买入丢失、卖出仍在），
+ * 宁可沿用旧数据也不回放残缺数据
+ * @param range 可选区间（增量更新用：库内最新成交日 → 今天；缺省从账本数据
+ * 起始日 TZZB_HOLDING_TRADE_START_DATE 拉满全历史）
+ * @param range.startDate 区间起始日 yyyyMMdd
+ * @param range.endDate 区间结束日 yyyyMMdd
+ * @returns 区间内流水；未配置代理 / 调用失败返回 null
+ */
+const pullTzzbHoldingTrades = async (
+  range?: { startDate?: string; endDate?: string },
+): Promise<TzzbStockTrade[] | null> => {
+  const effective = range ?? { startDate: TZZB_HOLDING_TRADE_START_DATE };
+  const count = String(TZZB_HOLDING_TRADE_PAGE_COUNT);
+  const first = await getTzzbStockTrades('1', effective, count);
+  if (!first) return null;
+  const maxPage = Math.min(first.maxPage, TZZB_HOLDING_TRADE_FETCH_MAX_PAGES);
+  const pages = Array.from({ length: Math.max(0, maxPage - 1) }, (_, i) => String(i + 2));
+  const rest = await mapWithConcurrency(
+    pages,
+    async (page, index) => ({
+      index,
+      data: await getTzzbStockTrades(page, effective, count),
+    }),
+    { concurrency: TZZB_HOLDING_TRADE_FETCH_CONCURRENCY },
+  );
+  if (rest.some((r) => r.data === null)) return null;
+  // 按页码归位（mapWithConcurrency 返回完成顺序，直接 flatMap 会打乱页序）
+  const list = dedupeHoldingTrades([
+    ...first.list,
+    ...rest.sort((a, b) => a.index - b.index).flatMap((r) => r.data?.list ?? []),
+  ]);
+  return list;
+};
+
+/**
+ * 执行一轮增量校验（单飞内的实际拉取逻辑，按持久层模式分流）
+ *
+ * - SQLite（Tauri 桌面端）：**真增量**——以库内最新成交日为 startDate（边界日
+ *   整日重拉，捕捉同日新增成交）、当前日期为 endDate 重拉增量段，INSERT OR
+ *   IGNORE 合并（唯一约束八元组去重），有新增才回读库内合并后的全量；
+ * - localStorage（浏览器降级）：上游无库可增量比对，退化为全量重拉 +
+ *   长度 / 末条日期比对。
+ * @param scope 发起校验时的账户范围口径（返回前校验未被切换，防止旧口径覆盖新口径缓存）
+ * @returns 有新数据时返回合并后的全量流水；无变化 / 失败返回 null
+ */
+const runHoldingRevalidate = async (
+  scope: string,
+): Promise<TzzbStockTrade[] | null> => {
+  const stored = await loadTzzbHoldingTradesFromDb(scope);
+  if (stored !== null) {
+    const lastDate = await getTzzbHoldingLastTradeDateFromDb(scope);
+    // 增量段：本地最新成交日（含，YYYYMMDD）→ 今天；无库数据时全量
+    const range = lastDate
+      ? {
+          startDate: lastDate.replaceAll('-', ''),
+          endDate: dayjs().format('YYYYMMDD'),
+        }
+      : undefined;
+    const fresh = await pullTzzbHoldingTrades(range);
+    if (!fresh) return null;
+    const inserted = await saveTzzbHoldingTradesToDb(scope, fresh);
+    if (inserted === 0) return null;
+    return await loadTzzbHoldingTradesFromDb(scope);
+  }
+  const fresh = await pullTzzbHoldingTrades();
+  if (!fresh) return null;
+  const changed =
+    !holdingTradesCache ||
+    fresh.length !== holdingTradesCache.length ||
+    fresh[fresh.length - 1]?.date !== holdingTradesCache[holdingTradesCache.length - 1]?.date;
+  return changed ? fresh : null;
+};
+
+/**
+ * 后台增量校验（stale-while-revalidate）：有新数据才更新内存缓存并回调 onFresh
+ * 驱动界面静默刷新；单飞防并发重复拉，口径切换守卫防旧范围覆盖新范围
+ * @param onFresh 拉到新数据回调（无变化 / 失败不回调）
+ */
+const revalidateHoldingTrades = async (
+  onFresh?: (list: TzzbStockTrade[]) => void,
+): Promise<void> => {
+  const scope = holdingScopeKey();
+  const apply = (list: TzzbStockTrade[] | null): void => {
+    if (list && holdingScopeKey() === scope) {
+      holdingTradesCache = list;
+      onFresh?.(list);
+    }
+  };
+  if (holdingTradesRevalidate) {
+    // 已有校验在跑：搭车等待同一份结果
+    void holdingTradesRevalidate.then(apply);
+    return;
+  }
+  holdingTradesRevalidate = runHoldingRevalidate(scope);
+  await holdingTradesRevalidate.finally(() => {
+    holdingTradesRevalidate = null;
+  }).then(apply);
+};
+
+/**
  * 拉取当前账户范围的全历史股票流水（当前持仓面板回放专用）
  *
- * 仪表盘的摩擦账本流水默认近 3 个月窗口——早于窗口开仓且窗口内未交易的持仓
- * 会被漏掉，故这里从账本数据起始日（TZZB_HOLDING_TRADE_START_DATE）拉满全历史，
- * 分页上限独立放宽（TZZB_HOLDING_TRADE_FETCH_MAX_PAGES）。
- * 缓存命中直接返回；账户范围变更 / 全量流水重拉时缓存自动失效。
+ * 三级提速（2026-11-17 优化）：
+ * 1. 内存缓存命中直接返回；
+ * 2. **SQLite 持久层**（Tauri 桌面端，tzzb_holding_trade 表）命中 → 秒回旧数据，
+ *    后台按「库内最新成交日 → 今天」区间做真增量合并（queryMoneyHistory 的
+ *    startDate / endDate 参数），有新增成交才静默刷新；浏览器端降级 localStorage
+ *    缓存走同款 stale-while-revalidate（全量比对）；
+ * 3. 首次全量拉取用大页（TZZB_HOLDING_TRADE_PAGE_COUNT）+ 余下页并行
+ *    （TZZB_HOLDING_TRADE_FETCH_CONCURRENCY）。
+ * 持仓与当日盈亏由流水回放推算，仪表盘摩擦账本流水默认近 3 个月窗口会漏
+ * 早期仓位，故全历史从账本数据起始日（TZZB_HOLDING_TRADE_START_DATE）拉满；
+ * 口径 key 隐含账户范围，setTzzbAccountScope 变更后自动按新范围取数。
+ * @param onFresh 持久层命中秒回后，后台增量校验拉到新数据时的回调（可选）
  * @returns 全历史流水列表；未配置代理 / 调用失败时返回 null
  */
-export const fetchTzzbHoldingTrades = async (): Promise<TzzbStockTrade[] | null> => {
+export const fetchTzzbHoldingTrades = async (
+  onFresh?: (list: TzzbStockTrade[]) => void,
+): Promise<TzzbStockTrade[] | null> => {
   if (holdingTradesCache) return holdingTradesCache;
-  const range = { startDate: TZZB_HOLDING_TRADE_START_DATE };
-  const first = await getTzzbStockTrades('1', range);
-  if (!first) return null;
-  const list = [...first.list];
-  const maxPage = Math.min(first.maxPage, TZZB_HOLDING_TRADE_FETCH_MAX_PAGES);
-  for (let page = 2; page <= maxPage; page += 1) {
-    const next = await getTzzbStockTrades(String(page), range);
-    if (!next || next.list.length === 0) break;
-    list.push(...next.list);
+  const scope = holdingScopeKey();
+  const stored = await loadTzzbHoldingTradesFromDb(scope);
+  if (stored !== null) {
+    // SQLite 可用（Tauri）：已有落库秒回 + 后台增量；空库走首次全量并落库
+    if (stored.length > 0) {
+      holdingTradesCache = stored;
+      void revalidateHoldingTrades(onFresh);
+      return stored;
+    }
+    const fresh = await pullTzzbHoldingTrades();
+    if (fresh) {
+      holdingTradesCache = fresh;
+      await saveTzzbHoldingTradesToDb(scope, fresh);
+    }
+    return fresh;
   }
-  holdingTradesCache = list;
-  return list;
+  // 浏览器降级：localStorage SWR
+  const cached = readHoldingTradesLocalCache();
+  if (cached) {
+    holdingTradesCache = cached;
+    void revalidateHoldingTrades(onFresh);
+    return cached;
+  }
+  const fresh = await pullTzzbHoldingTrades();
+  if (fresh) {
+    holdingTradesCache = fresh;
+    writeHoldingTradesLocalCache(fresh);
+  }
+  return fresh;
 };
 
 /**
