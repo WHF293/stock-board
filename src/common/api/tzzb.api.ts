@@ -27,6 +27,7 @@ import {
   type TzzbHoldingReturn,
   type TzzbMonthCalendar,
   type TzzbPnlSummary,
+  type TzzbPositionHolding,
   type TzzbPositionSummary,
   type TzzbStockTrade,
   type TzzbStockTradePage,
@@ -578,7 +579,7 @@ export const getTzzbPnlSummary = async (range = 'm1'): Promise<TzzbPnlSummary | 
 };
 
 /**
- * 持仓汇总（queryStockPosition 顶层：总资产 / 市值 / 可用资金 / 仓位）
+ * 持仓汇总（queryStockPosition 顶层：总资产 / 市值 / 可用资金 / 仓位 + holdings 明细）
  * @returns 汇总对象；未配置代理 / 调用失败时返回 null
  */
 export const getTzzbPositionSummary = async (): Promise<TzzbPositionSummary | null> => {
@@ -588,11 +589,22 @@ export const getTzzbPositionSummary = async (): Promise<TzzbPositionSummary | nu
     | Record<string, unknown>
     | undefined;
   if (!r) return null;
+  const holdings = ((r['holdings'] as Record<string, unknown>[] | undefined) ?? []).map(
+    (row): TzzbPositionHolding => ({
+      code: String(row['stockCode'] ?? ''),
+      name: String(row['stockName'] ?? ''),
+      quantity: num(row['holdQuantity']),
+      price: num(row['currentPrice']),
+      costPrice: num(row['costPrice']),
+      marketValue: num(row['marketValue']),
+    }),
+  );
   return {
     totalAsset: num(r['totalAsset']),
     marketValue: num(r['totalMarketValue']),
     availableFunds: num(r['availableFunds']),
     positionRatio: num(r['positionRatio']),
+    holdings,
   };
 };
 

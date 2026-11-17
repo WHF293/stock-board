@@ -15,11 +15,13 @@ const props = defineProps<{
   availableFunds: number;
   /** 当前仓位 0~1 */
   positionRatio: number;
-  /** 当日盈亏（最新净值点 dailyProfit；无曲线数据为 0） */
+  /** 当日盈亏（实时推算或最新净值点 dailyProfit；无数据为 0） */
   dailyProfit: number;
-  /** 当日收益率（小数；null = 无曲线数据） */
+  /** 当日收益率（小数；null = 无数据） */
   dailyRate: number | null;
-  /** 当日盈亏归属交易日（YYYYMMDD；空 = 无曲线数据） */
+  /** 当日盈亏来源（live = 流水回放+实时行情盘中推算；cleared = 券商清算净值点，默认） */
+  dailySource?: 'live' | 'cleared';
+  /** 当日盈亏归属交易日（YYYYMMDD；空 = 无数据） */
   dailyDate: string;
   /** 区间盈亏 */
   rangeProfit: number;
@@ -81,7 +83,9 @@ const excessClass = computed(() =>
     </div>
 
     <div class="rounded-card bg-surface p-4 shadow-card">
-      <p class="mb-1 text-xs text-text-tertiary">当日盈亏{{ dailyDateLabel ? `（${dailyDateLabel}）` : '' }}</p>
+      <p class="mb-1 text-xs text-text-tertiary">
+        当日盈亏{{ dailySource === 'live' ? '（实时推算）' : dailyDateLabel ? `（${dailyDateLabel}）` : '' }}
+      </p>
       <p class="font-mono text-xl font-semibold tabular-nums" :class="dailyClass">
         {{ dailyProfit > 0 ? '+' : '' }}{{ yuan(dailyProfit) }}
       </p>

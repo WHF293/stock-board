@@ -56,6 +56,22 @@ export interface TzzbPnlSummary {
   indexTrend: TzzbIndexPoint[];
 }
 
+/** 单只持仓明细（queryStockPosition.holdings；清算后权威口径） */
+export interface TzzbPositionHolding {
+  /** 证券代码（6 位） */
+  code: string;
+  /** 证券名称 */
+  name: string;
+  /** 持仓数量（股/份；0 = 已清仓，该行仍在列表里） */
+  quantity: number;
+  /** 现价（元） */
+  price: number;
+  /** 摊薄成本价（元；券商清算口径） */
+  costPrice: number;
+  /** 持仓市值（元） */
+  marketValue: number;
+}
+
 /** 持仓汇总（queryStockPosition 顶层字段） */
 export interface TzzbPositionSummary {
   totalAsset: number;
@@ -64,6 +80,8 @@ export interface TzzbPositionSummary {
   availableFunds: number;
   /** 仓位比例 0~1 */
   positionRatio: number;
+  /** 持仓明细列表（含已清仓行；用于持仓回放的权威锚定，2026-11-17 新增） */
+  holdings: TzzbPositionHolding[];
 }
 
 /** 区间资金变动单侧（queryAssetChangeSummary 的 stock / fund 子对象） */

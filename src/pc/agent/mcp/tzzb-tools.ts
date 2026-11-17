@@ -96,7 +96,7 @@ export const TZZB_MCP_SERVER: BuiltinMcpServer = {
     entry({
       name: 'get_tzzb_position_summary',
       description:
-        '获取当前持仓汇总：总资产、持仓市值、可用资金、仓位比例。用于「现在有多少钱、仓位多重」类问题。金额单位元，仓位为 0~1 小数',
+        '获取当前持仓汇总：总资产、持仓市值、可用资金、仓位比例，以及 holdings 持仓明细列表（代码/名称/持仓数量/现价/摊薄成本价/市值，含已清仓的 0 数量行——券商清算后权威口径）。用于「现在有多少钱、仓位多重、持有什么」类问题。金额单位元，仓位为 0~1 小数',
       schema: z.object({}),
       run: async () => getTzzbPositionSummary(),
     }),
