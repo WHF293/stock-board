@@ -8,7 +8,10 @@ import HotBoardCard from '../components/hot-board/HotBoardCard.vue';
 import HotBoardList from '../components/hot-board/HotBoardList.vue';
 import HotBoardSourceModal from '../components/hot-board/HotBoardSourceModal.vue';
 import BaseTabs from '../components/ui/BaseTabs.vue';
+import MarketRankTabSettingsModal from '../components/business/MarketRankTabSettingsModal.vue';
 import EtfHotBoard from '../components/etf-hot/EtfHotBoard.vue';
+import HotConceptBoard from '../components/hot-concept/HotConceptBoard.vue';
+import HotNewsView from './HotNewsView.vue';
 import HotNewsChannelBar from '../components/news/HotNewsChannelBar.vue';
 import { fetchHotBoard } from '../../common/api/hot-board.api.ts';
 import type { HotBoardItem } from '../../common/types/hot-board.types.ts';
@@ -19,7 +22,7 @@ import { useNotificationsStore } from '../../common/stores/notifications';
 import { DATA_CACHE_KEY } from '../../common/constants/data-cache.constants.ts';
 import { HOST_HEADER_ITEM } from '../../common/constants/header.constants.ts';
 import { NOTIFY_TONE } from '../../common/constants/notify.constants.ts';
-import { STORAGE_NS_HOT_BOARD_FILTER, STORAGE_NS_HOT_BOARD_MODE } from '../../common/constants/storage-key.constants.ts';
+import { STORAGE_NS_HOT_BOARD_FILTER, STORAGE_NS_HOT_BOARD_MODE, STORAGE_NS_HOT_BOARD_TABS } from '../../common/constants/storage-key.constants.ts';
 import { usePageHeaderSlot, PAGE_HEADER_ACTIONS_TARGET } from '../../common/composables/use-page-header-slot';
 import { ROUTE_PATH } from '../../common/constants/router-meta.constants.ts';
 import {
@@ -38,39 +41,142 @@ import { requestAgentAnalysis } from '../agent/agent-bridge';
 import { useSettingsStore } from '../../common/stores/settings';
 
 /**
- * 今天炒什么：热榜聚合页（双模式）
+ * 今天炒什么：热榜聚合页（四模式）
  *
- * 「股票热榜」= 五平台热股榜单聚合（每平台一张 375px 横向卡片，卡片内
- * chips 切换分组，A 股口径）；「ETF 热榜」= 同花顺四 ETF 榜单聚合
- * （热度 / 自选 / 补涨 / T+0，一个榜单单独一列）；页头切换条切换两种视图，
- * 模式持久化到 appStorage；各通道 30 分钟 TTL 缓存跨页复用；
- * 点击榜单行打开个股详情停靠面板；「AI 分析」把当前模式的榜单清单投递
- * Agent 窗口；「平台设置」弹窗勾选显隐 + 拖拽排序（草稿模式，仅股票热榜）
+ * 「今天题材」= 同花顺 hot_concept 最新交易日热点卡片流（卡片本体为热点二级页 iframe，
+ * 2026-11-17 王总指定新增，同日由「市场热点」更名并调至首个页签）；
+ * 「热点新闻」= 六平台资讯卡片流（2026-11-17 自侧栏整页并入，复用 HotNewsView 组件，
+ * 页头「新闻源设置」由本页统一投射）；「股票热榜」= 五平台热股榜单聚合
+ * （每平台一张 375px 横向卡片，卡片内 chips 切换分组，A 股口径）；
+ * 「ETF 热榜」= 同花顺四 ETF 榜单聚合（热度 / 自选 / 补涨 / T+0，一个榜单单独一列）；
+ * 页签顺序 / 显隐由页头「页签设置」控制（盘面雷达同款交互，appStorage 持久化，
+ * 默认顺序 今天题材 / 热点新闻 / 股票热榜 / ETF 热榜）；各通道 30 分钟 TTL 缓存
+ * 跨页复用；点击榜单行打开个股详情停靠面板；「AI 分析」把当前模式的榜单清单
+ * 投递 Agent 窗口；「平台设置」弹窗勾选显隐 + 拖拽排序（草稿模式，仅股票热榜）
  */
 
-// ---------- 视图模式（股票热榜 / ETF 热榜） ----------
+// ---------- 视图模式（今天题材 / 热点新闻 / 股票热榜 / ETF 热榜） ----------
 
 /**
- * 从 appStorage 加载视图模式（非法值回落股票热榜）
+ * 从 appStorage 加载视图模式（非法值 / 未设置回落首个默认页签 = 今天题材）
  * @returns 当前模式
  */
-const loadMode = (): HotBoardMode =>
-  appStorage.getItem(STORAGE_NS_HOT_BOARD_MODE) === 'etf' ? 'etf' : 'stock';
+const loadMode = (): HotBoardMode => {
+  const raw = appStorage.getItem(STORAGE_NS_HOT_BOARD_MODE);
+  return raw === 'etf' || raw === 'concept' || raw === 'news' || raw === 'stock' ? raw : 'concept';
+};
 
 /** 当前视图模式（持久化到 appStorage，下次进入沿用） */
 const mode = ref<HotBoardMode>(loadMode());
 
-/** BaseTabs 的 string v-model 与强类型 mode 的双向适配 */
+/**
+ * BaseTabs 的 string v-model 与强类型 mode 的双向适配
+ * @param value tab 传入的模式字符串
+ */
 const modeValue = computed({
   get: () => mode.value,
   set: (value: string) => {
-    mode.value = value === 'etf' ? 'etf' : 'stock';
+    mode.value = value === 'etf' || value === 'concept' || value === 'news' || value === 'stock'
+      ? value
+      : 'concept';
   },
 });
 
 watch(mode, (value) => {
   appStorage.setItem(STORAGE_NS_HOT_BOARD_MODE, value);
 });
+
+// ---------- 页签顺序与显隐（页头「页签设置」弹窗，盘面雷达同款交互；
+// 2026-11-17 王总指定新增：默认顺序 今天题材 / 热点新闻 / 股票热榜 / ETF 热榜） ----------
+
+/** 页签设置（顺序 + 显隐；appStorage 持久化） */
+interface HotBoardTabSettings {
+  /** 页签值顺序（缺失的页签按默认顺序补在末尾） */
+  order: string[];
+  /** 隐藏的页签值 */
+  hidden: string[];
+}
+
+/**
+ * 归一化页签设置：剔除已不存在的页签值，补齐新出现的页签（按默认顺序排末尾）
+ * @param settings 持久化读出的设置
+ * @returns 归一化后的设置
+ */
+const normalizeTabSettings = (settings: HotBoardTabSettings): HotBoardTabSettings => {
+  const known = new Set<string>(HOT_BOARD_MODE_TAB_OPTIONS.map((option) => option.value));
+  const order = [
+    ...settings.order.filter((value) => known.has(value)),
+    ...HOT_BOARD_MODE_TAB_OPTIONS.map((option) => option.value).filter(
+      (value) => !settings.order.includes(value),
+    ),
+  ];
+  return { order, hidden: settings.hidden.filter((value) => known.has(value)) };
+};
+
+/** 页签设置（appStorage 持久化，进页归一化一次；损坏数据回退默认全显） */
+const tabSettings = ref<HotBoardTabSettings>(
+  normalizeTabSettings(
+    (() => {
+      try {
+        return JSON.parse(appStorage.getItem(STORAGE_NS_HOT_BOARD_TABS) ?? 'null') as
+          | HotBoardTabSettings
+          | null;
+      } catch {
+        return null;
+      }
+    })() ?? { order: HOT_BOARD_MODE_TAB_OPTIONS.map((option) => option.value), hidden: [] },
+  ),
+);
+
+// 设置整包持久化（下次进页恢复上次的页签顺序与显隐）
+watch(
+  tabSettings,
+  (value) => {
+    appStorage.setItem(STORAGE_NS_HOT_BOARD_TABS, JSON.stringify(value));
+  },
+  { deep: true },
+);
+
+/** 可见页签选项（顺序 = 设置顺序；BaseTabs 直接消费） */
+const visibleTabOptions = computed(() =>
+  tabSettings.value.order
+    .filter((value) => !tabSettings.value.hidden.includes(value))
+    .map((value) => HOT_BOARD_MODE_TAB_OPTIONS.find((option) => option.value === value))
+    .filter((option): option is (typeof HOT_BOARD_MODE_TAB_OPTIONS)[number] => option !== undefined),
+);
+
+// 当前模式被隐藏（页签设置取消勾选）时回落到首个可见页签
+watch(visibleTabOptions, (options) => {
+  if (options.length > 0 && !options.some((option) => option.value === mode.value)) {
+    mode.value = options[0].value;
+  }
+});
+
+/** 页签设置弹窗条目（勾选 + 拖拽草稿的数据源） */
+const tabSettingsItems = computed(() =>
+  tabSettings.value.order.map((value) => {
+    const option = HOT_BOARD_MODE_TAB_OPTIONS.find((item) => item.value === value);
+    return {
+      value,
+      label: option?.label ?? value,
+      enabled: !tabSettings.value.hidden.includes(value),
+    };
+  }),
+);
+
+/** 页签设置弹窗开关 */
+const tabSettingsOpen = ref(false);
+
+/**
+ * 页签设置确认：按拖拽结果更新顺序，勾选结果更新显隐（watch 自动持久化）
+ * @param items 弹窗回传的页签设置（顺序即展示顺序）
+ */
+const onTabSettingsConfirm = (items: { value: string; enabled: boolean }[]): void => {
+  tabSettings.value = {
+    order: items.map((item) => item.value),
+    hidden: items.filter((item) => !item.enabled).map((item) => item.value),
+  };
+};
 
 /** 单平台单分组的加载状态（通道键 = `source#group`） */
 interface BoardState {
@@ -180,6 +286,9 @@ const dockPanel = useDockPanelStore();
 const stockContext = useStockContextStore();
 const notifications = useNotificationsStore();
 const router = useRouter();
+
+/** 热点新闻视图实例（页头「新闻源设置」经其 expose 的接口操作，2026-11-17 自侧栏并入） */
+const newsViewRef = ref<InstanceType<typeof HotNewsView> | null>(null);
 
 /**
  * 缓存是否在有效期内
@@ -466,12 +575,18 @@ const runBoardAnalysis = async (scope: BoardSource): Promise<void> => {
   <!-- 单根容器：MainLayout 通过 :class="pageAnim" 下发页面进入动画类名，
          而多根组件无法继承 attrs（会丢动画并刷 Vue warn），故统一包一层；
          高度 h-full 填满 MainLayout 内容容器（定高，2026-10-24 起双滚动条治理），
-         tab 行 shrink-0，两种模式的内容区各撑满剩余高度 -->
+         tab 行 shrink-0，四种模式的内容区各撑满剩余高度 -->
   <div class="flex h-full min-h-0 flex-col gap-4">
-    <!-- 页级动作上移 MainLayout 页头：股票热榜专属
-         （启用计数 / 平台设置；ETF 模式的页头动作由 EtfHotBoard 自行投射） -->
+    <!-- 页级动作上移 MainLayout 页头：页签设置（四模式通用，盘面雷达同款）
+         + 股票热榜专属（启用计数 / 平台设置）+ 热点新闻专属（新闻源设置，
+         2026-11-17 随页面自侧栏并入，经 expose 接口操作）；ETF 模式的页头动作
+         由 EtfHotBoard 自行投射；今天题材模式的刷新在 HotConceptBoard 控制行内 -->
     <Teleport v-if="headerSlotActive" :to="PAGE_HEADER_ACTIONS_TARGET">
       <div class="flex items-center gap-3">
+        <BaseButton variant="ghost" data-track="HOT_BOARD_TAB_SETTINGS" @click="tabSettingsOpen = true">
+          <MenuIcon name="settings" :size="14" />
+          页签设置
+        </BaseButton>
         <template v-if="mode === 'stock'">
           <span class="text-xs text-text-tertiary">
             已启用 {{ visibleSources.length }} / {{ sourceItems.length }} 个平台
@@ -481,11 +596,29 @@ const runBoardAnalysis = async (scope: BoardSource): Promise<void> => {
             平台设置
           </BaseButton>
         </template>
+        <!-- 热点新闻 tab：新闻源设置（2026-11-17 随页面自侧栏并入，经 expose 接口操作） -->
+        <template v-if="mode === 'news'">
+          <span class="text-xs text-text-tertiary">
+            已启用 {{ newsViewRef?.enabledSourceCount ?? 0 }} /
+            {{ newsViewRef?.totalSourceCount ?? 0 }} 个新闻源
+          </span>
+          <BaseButton variant="ghost" @click="newsViewRef?.openSourceSettings()">
+            <MenuIcon name="settings" :size="14" />
+            新闻源设置
+          </BaseButton>
+        </template>
       </div>
     </Teleport>
 
     <!-- 平台设置弹窗（草稿模式：确认才生效） -->
     <HotBoardSourceModal v-model:open="sourceModalOpen" :items="sourceOptions" @confirm="onSourceConfirm" />
+
+    <!-- 页头「页签设置」弹窗（拖拽排序 + 勾选显隐，盘面雷达同款组件复用） -->
+    <MarketRankTabSettingsModal
+      v-model:open="tabSettingsOpen"
+      :items="tabSettingsItems"
+      @confirm="onTabSettingsConfirm"
+    />
 
     <!-- 放大弹窗：宽版两列布局，复用该平台当前分组的数据（不另开请求） -->
     <BaseModal
@@ -522,13 +655,21 @@ const runBoardAnalysis = async (scope: BoardSource): Promise<void> => {
       </template>
     </BaseModal>
 
-    <!-- 视图模式 tab 行（underline 变体，行情全景页同款；两模式常驻） -->
+    <!-- 视图模式 tab 行（underline 变体，行情全景页同款；顺序 / 显隐 = 页签设置） -->
     <div class="shrink-0">
-      <BaseTabs v-model="modeValue" :options="HOT_BOARD_MODE_TAB_OPTIONS" variant="underline" />
+      <BaseTabs v-model="modeValue" :options="visibleTabOptions" variant="underline" />
     </div>
 
     <!-- ETF 热榜模式：同花顺四 ETF 榜单聚合（组件内自带首屏 / 缓存 / 放大弹窗） -->
     <EtfHotBoard v-if="mode === 'etf'" class="min-h-0 flex-1" />
+
+    <!-- 热点新闻模式：六平台资讯卡片流整页复用（2026-11-17 自侧栏并入；
+         embedded 形态 = 页头动作由本页统一投射、去卡片流内边距） -->
+    <HotNewsView v-else-if="mode === 'news'" ref="newsViewRef" embedded class="min-h-0 flex-1" />
+
+    <!-- 今天题材模式（原「市场热点」，2026-11-17 更名）：同花顺 hot_concept 最新交易日
+         热点卡片流（卡片本体 = 二级页 iframe，暗色反色滤镜跟随主题） -->
+    <HotConceptBoard v-else-if="mode === 'concept'" class="min-h-0 flex-1" />
 
     <!-- 股票热榜模式：横向卡片流，每平台一张 375px 卡片，超出页面横向滚动（撑满 tab 行以下剩余高度） -->
     <div v-else class="flex min-h-0 flex-1 gap-4 overflow-x-auto">

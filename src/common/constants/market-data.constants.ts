@@ -3,12 +3,12 @@
  *
  * 盯盘小组件三个内容视图（成交额 / 热点新闻 / 今天炒什么）的「源切换」可选项：
  * key 归取数实现层分发，label 给气泡里的源切换下拉直接展示。
- * 与热点新闻页 / 今天炒什么页的源全集保持一致，页面侧各自另有更全的常量，
- * 这里只收窄到小组件需要的最小集。
+ * 与热点新闻（今天炒什么页 tab，2026-11-17 自侧栏并入）/ 今天炒什么页的源全集保持一致，
+ * 页面侧各自另有更全的常量，这里只收窄到小组件需要的最小集。
  */
 import type { MarketBoardSource, MarketNewsSource } from '../types/market-data.types.ts';
 
-/** 新闻源可选项（数组顺序 = 气泡下拉顺序；财联社优先与热点新闻页默认一致） */
+/** 新闻源可选项（数组顺序 = 气泡下拉顺序；财联社优先与热点新闻 tab 默认一致） */
 export const MARKET_NEWS_SOURCES: readonly { value: MarketNewsSource; label: string }[] = [
   { value: 'cls', label: '财联社' },
   { value: 'sina', label: '新浪财经' },

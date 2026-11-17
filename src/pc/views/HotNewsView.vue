@@ -85,7 +85,17 @@ import { NOTIFY_TONE } from "../../common/constants/notify.constants.ts";
  * 卡片右上角「放大」按钮打开宽版弹窗（两列网格），数据与分页状态与卡片共享；
  * 顶部「新闻源设置」弹窗：勾选控制显示/隐藏，拖拽手柄调整卡片顺序，
  * 顺序与勾选整包持久化到 appStorage
+ *
+ * 入口形态（2026-11-17 王总指定变更）：侧栏菜单入口已移除，整页并入「今天炒什么」
+ * 第二个 tab —— 传 embedded=true 时抑制自己的页头 Teleport（页头「新闻源设置」
+ * 由 tab 容器 HotBoardView 统一投射，经 defineExpose 暴露开关与计数），
+ * 并去掉卡片流的内边距以对齐页内其他 tab 的卡片流间距
  */
+
+defineProps<{
+  /** 嵌入式形态（今天炒什么页 tab 容器内使用：抑制页头投射、去内边距） */
+  embedded?: boolean;
+}>();
 
 /** 卡片级新闻源（设置弹窗里可勾选 / 拖拽排序的粒度） */
 type NewsSource = "sina" | "eastmoney" | "ths" | "thepaper" | "cls" | "tdx";
@@ -1327,6 +1337,19 @@ const loadMoreLabel = (state: SourceState): string => {
   if (!state.hasMore) return "没有更多了";
   return "加载更多";
 };
+
+// ---------- 嵌入式 tab 接口（今天炒什么页 tab 容器调用，2026-11-17 迁移） ----------
+
+defineExpose({
+  /** 打开「新闻源设置」弹窗（tab 容器页头按钮调用） */
+  openSourceSettings: (): void => {
+    sourceModalOpen.value = true;
+  },
+  /** 已启用新闻源数（tab 容器页头计数展示） */
+  enabledSourceCount: computed(() => sourceItems.value.filter((item) => item.enabled).length),
+  /** 新闻源总数 */
+  totalSourceCount: computed(() => sourceItems.value.length),
+});
 </script>
 
 <template>
@@ -1335,8 +1358,9 @@ const loadMoreLabel = (state: SourceState): string => {
          h-full 填满 MainLayout 内容容器（定高，2026-10-24 双滚动条治理） -->
   <div class="h-full">
     <!-- 页级动作上移 MainLayout 页头：启用计数 + 新闻源设置
-         （Teleport 投射，本页激活时才挂载；「新闻源设置」弹窗仍留在页内） -->
-    <Teleport v-if="headerSlotActive" :to="PAGE_HEADER_ACTIONS_TARGET">
+         （Teleport 投射，本页激活时才挂载；「新闻源设置」弹窗仍留在页内；
+         embedded 形态下不投射——tab 容器 HotBoardView 统一投射同一组动作） -->
+    <Teleport v-if="!embedded && headerSlotActive" :to="PAGE_HEADER_ACTIONS_TARGET">
       <div class="flex items-center gap-3">
         <span class="text-xs text-text-tertiary">
           已启用 {{ visibleCards.length }} / {{ sourceItems.length }} 个新闻源
@@ -1593,9 +1617,12 @@ const loadMoreLabel = (state: SourceState): string => {
     </BaseModal>
 
     <!-- 横向卡片流：每源一张 375px 卡片，超出页面横向滚动 -->
-    <!-- 高度 h-full 填满 MainLayout 内容容器（2026-10-24 双滚动条治理；
-         页级动作工具条已上移页头，不再为其预留高度） -->
-    <div class="flex h-full min-h-0 gap-4 overflow-x-auto p-4">
+    <!-- 高度 h-full 填满容器（2026-10-24 双滚动条治理；页级动作工具条已上移页头）；
+         embedded 形态下去内边距（tab 容器已有间距，对齐其他 tab 的卡片流） -->
+    <div
+      class="flex h-full min-h-0 gap-4 overflow-x-auto"
+      :class="embedded ? '' : 'p-4'"
+    >
       <BaseCard
         v-for="card in cardViews"
         :key="card.value"

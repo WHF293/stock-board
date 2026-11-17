@@ -4,17 +4,25 @@
  * 五个热股平台（同花顺 / 东财 / 财联社 / 通达信 / 雪球）各占一张卡片，
  * 卡片内保留该平台自己的榜单分组（chips 切换，只做 A 股口径）；
  * 分组定义同时被页面与放大弹窗消费，故抽到本文件共享
- * （`<script setup>` 内不能 export，SFC 之间无法互相导入类型与常量）
+ * （`<script setup>` 内不能 export，SFC 之间无法互相导入类型与常量）；
+ * 「今天题材」（原「市场热点」，2026-11-17 王总指定更名）与「热点新闻」（同日自侧栏并入，
+ * 整页复用 HotNewsView 组件）也经本文件的模式类型路由
  */
 
 /** 热股平台（设置弹窗里可勾选 / 拖拽排序的粒度，即卡片粒度） */
 export type BoardSource = 'ths' | 'em' | 'cls' | 'tdx' | 'xq';
 
-/** 今天炒什么页的视图模式（'stock' = 股票热榜 / 'etf' = ETF 热榜） */
-export type HotBoardMode = 'stock' | 'etf';
+/** 今天炒什么页的视图模式（'stock' = 股票热榜 / 'news' = 热点新闻 / 'etf' = ETF 热榜 / 'concept' = 今天题材） */
+export type HotBoardMode = 'stock' | 'news' | 'etf' | 'concept';
 
-/** 视图模式切换 tab 选项（BaseTabs 消费，数组顺序 = 渲染顺序） */
+/**
+ * 视图模式切换 tab 选项（BaseTabs 消费）——
+ * 数组顺序 = 默认渲染顺序（2026-11-17 王总指定：今天题材 / 热点新闻 / 股票热榜 / ETF 热榜；
+ * 实际顺序与显隐以页头「页签设置」为准，见 HotBoardView 的 tabSettings）
+ */
 export const HOT_BOARD_MODE_TAB_OPTIONS: readonly { value: HotBoardMode; label: string }[] = [
+  { value: 'concept', label: '今天题材' },
+  { value: 'news', label: '热点新闻' },
   { value: 'stock', label: '股票热榜' },
   { value: 'etf', label: 'ETF 热榜' },
 ];
