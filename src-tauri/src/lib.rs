@@ -749,6 +749,40 @@ ALTER TABLE board_daily ADD COLUMN bucket_lt_5       REAL;
 ALTER TABLE board_daily ADD COLUMN bucket_limit_down REAL;
 ";
 
+/// stock-board.db v11：投资账本持仓回放流水（tzzb_holding_trade）
+///
+/// 「当前持仓 · 实时盈亏」模块的全历史成交流水落库（2026-11-17）：
+/// 由账本 MCP queryMoneyHistory 按**账户范围口径**拉取后增量合并——
+/// 上游无真增量接口，本地以「库内最新成交日 → 今天」区间重拉增量段，
+/// 边界日（最后成交日）整日重拉以捕捉同日新增成交，唯一约束 + INSERT OR
+/// IGNORE 去重（上游无逐笔唯一 id，八元组近似身份，同价同量的真实重复单
+/// 会被合并，量级可忽略）。
+/// scope = 账户范围口径 key（'all' = 汇总 / 单账户 id / 多选 id 逗号拼接），
+/// 与前端 tzzb.api 的 scopeAccountIds 一致；范围间数据按行冗余（流水总量
+/// 数千行级，不做去重归一）。
+/// trade_date 为 `YYYY-MM-DD`（上游 entryDate 原样）；price / quantity /
+/// amount / 费用列 REAL（基金份额可能带小数）。
+const STOCK_BOARD_DB_V11: &str = "
+CREATE TABLE IF NOT EXISTS tzzb_holding_trade (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  scope       TEXT    NOT NULL,
+  trade_date  TEXT    NOT NULL,
+  code        TEXT    NOT NULL,
+  name        TEXT    NOT NULL,
+  action      TEXT    NOT NULL,
+  price       REAL    NOT NULL,
+  quantity    REAL    NOT NULL,
+  amount      REAL    NOT NULL,
+  commission  REAL    NOT NULL DEFAULT 0,
+  transfer_fee REAL   NOT NULL DEFAULT 0,
+  fee_total   REAL    NOT NULL DEFAULT 0,
+  synced_at   INTEGER NOT NULL,
+  UNIQUE(scope, trade_date, code, action, price, quantity, amount, fee_total)
+);
+CREATE INDEX IF NOT EXISTS idx_tzzb_holding_trade_scope_date
+  ON tzzb_holding_trade(scope, trade_date);
+";
+
 /// weblog.db v1：系统日志（报错日志 + 行为日志）
 ///
 /// 独立成库的理由：日志是高频写入 + 按保留期整段删除的「滚动数据」，
@@ -883,6 +917,12 @@ fn stock_board_db_migrations() -> Vec<Migration> {
       version: 10,
       description: "add_board_daily_score_buckets",
       sql: STOCK_BOARD_DB_V10,
+      kind: MigrationKind::Up,
+    },
+    Migration {
+      version: 11,
+      description: "create_tzzb_holding_trade",
+      sql: STOCK_BOARD_DB_V11,
       kind: MigrationKind::Up,
     },
   ]
