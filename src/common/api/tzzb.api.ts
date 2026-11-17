@@ -4,13 +4,16 @@ import {
   TZZB_TRADE_FETCH_MAX_PAGES,
 } from '../types/tzzb.types.ts';
 import {
+  TZZB_DATA_START_DATE_DASHED,
   TZZB_HOLDING_TRADE_FETCH_CONCURRENCY,
   TZZB_HOLDING_TRADE_PAGE_COUNT,
   TZZB_HOLDING_TRADE_START_DATE,
   TZZB_HOLDING_TRADES_CACHE_KEY,
+  TZZB_HOLDING_TRADES_REBUILD_KEY,
 } from '../constants/tzzb-holding.constants.ts';
 import { mapWithConcurrency } from '../utils/map-with-concurrency.ts';
 import {
+  clearTzzbHoldingTradesScope,
   getTzzbHoldingLastTradeDateFromDb,
   loadTzzbHoldingTradesFromDb,
   saveTzzbHoldingTradesToDb,
@@ -474,7 +477,8 @@ const parseCloseDate = (v: unknown): string | null => {
 /* ---------------- 接口 ---------------- */
 
 /**
- * 区间 → 起止日期（yyyyMMdd；'all' 以同步水位 2025-09-30 为起点）
+ * 区间 → 起止日期（yyyyMMdd；'all' 以账本数据起始日 2024-10-08 为起点，
+ * 与投资账本 App「全部」区间口径一致——实测该起点总盈亏与 App 完全一致）
  * @param range TZZB_RANGE_OPTIONS value
  * @returns [startDate, endDate]
  */
@@ -492,7 +496,7 @@ const rangeDates = (range: string): [string, string] => {
             : range === 'ytd'
               ? today.startOf('year')
               : range === 'all'
-                ? dayjs('2025-09-30')
+                ? dayjs(TZZB_DATA_START_DATE_DASHED)
                 : today.startOf('month');
   return [start.format('YYYYMMDD'), today.format('YYYYMMDD')];
 };
@@ -716,7 +720,7 @@ export const getTzzbClearedPositions = async (): Promise<TzzbClearedPosition[]> 
   const keys = await ensureKeys();
   if (!keys) return [];
   const r = (await callTzzbTool('queryClearedPosition', {
-    openDate: '2025-09-30',
+    openDate: TZZB_DATA_START_DATE_DASHED,
     closeDate: dayjs().format('YYYY-MM-DD'),
     groupBy: 'stock',
     ...stockKeyArgs(keys),
@@ -1029,23 +1033,29 @@ export const fetchTzzbHoldingTrades = async (
 ): Promise<TzzbStockTrade[] | null> => {
   if (holdingTradesCache) return holdingTradesCache;
   const scope = holdingScopeKey();
+  // 拉取口径结构性重建水位：起始日常量变更（2026-11-18 起 20241008）后旧缓存
+  // 缺 2024-10 ~ 2025-09 段，首个命中口径同步清库全量重建一次（可重建缓存，
+  // 非用户数据），重建过则照常秒回 + SWR
+  const needRebuild = shouldRebuildHoldingTradesForStartDate(scope);
   const stored = await loadTzzbHoldingTradesFromDb(scope);
   if (stored !== null) {
     // SQLite 可用（Tauri）：已有落库秒回 + 后台增量；空库走首次全量并落库
-    if (stored.length > 0) {
+    if (stored.length > 0 && !needRebuild) {
       holdingTradesCache = stored;
       void revalidateHoldingTrades(onFresh);
       return stored;
     }
+    if (needRebuild) await clearTzzbHoldingTradesScope(scope);
     const fresh = await pullTzzbHoldingTrades();
     if (fresh) {
       holdingTradesCache = fresh;
       await saveTzzbHoldingTradesToDb(scope, fresh);
+      markHoldingTradesRebuilt(scope);
     }
     return fresh;
   }
   // 浏览器降级：localStorage SWR
-  const cached = readHoldingTradesLocalCache();
+  const cached = needRebuild ? null : readHoldingTradesLocalCache();
   if (cached) {
     holdingTradesCache = cached;
     void revalidateHoldingTrades(onFresh);
@@ -1055,8 +1065,40 @@ export const fetchTzzbHoldingTrades = async (
   if (fresh) {
     holdingTradesCache = fresh;
     writeHoldingTradesLocalCache(fresh);
+    markHoldingTradesRebuilt(scope);
   }
   return fresh;
+};
+
+/**
+ * 判断持仓回放流水缓存是否需要按起始日结构性重建（水位未覆盖当前口径/起始日）
+ * @param scope 账户范围口径 key
+ * @returns true = 需要清缓存全量重建
+ */
+const shouldRebuildHoldingTradesForStartDate = (scope: string): boolean => {
+  try {
+    const raw = localStorage.getItem(TZZB_HOLDING_TRADES_REBUILD_KEY);
+    if (!raw) return true;
+    const mark = JSON.parse(raw) as { scope?: string; startDate?: string };
+    return mark.scope !== scope || mark.startDate !== TZZB_HOLDING_TRADE_START_DATE;
+  } catch {
+    return true;
+  }
+};
+
+/**
+ * 记录持仓回放流水已完成按当前起始日的结构性重建（持久化水位）
+ * @param scope 账户范围口径 key
+ */
+const markHoldingTradesRebuilt = (scope: string): void => {
+  try {
+    localStorage.setItem(
+      TZZB_HOLDING_TRADES_REBUILD_KEY,
+      JSON.stringify({ scope, startDate: TZZB_HOLDING_TRADE_START_DATE }),
+    );
+  } catch {
+    // localStorage 不可用：仅影响下次启动重建一次，内存缓存仍生效
+  }
 };
 
 /**
