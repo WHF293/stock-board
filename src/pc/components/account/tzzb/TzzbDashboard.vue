@@ -21,29 +21,47 @@ import type { RankDataset } from '../../../../common/types/rank-dataset.types';
 import {
   clearTzzbMcpAuth,
   fetchAuthorizedAt,
+  fetchTzzbHoldingTrades,
   getTzzbAccounts,
-  getTzzbAssetChange,
-  getTzzbClearedPositions,
   getTzzbDayCalendar,
-  getTzzbFundCycles,
-  getTzzbFundHoldingReturns,
-  fetchTzzbAllStockTrades,
-  getTzzbFundTrades,
   getTzzbMonthCalendar,
   getTzzbPnlSummary,
-  getTzzbPositionSummary,
   getTzzbSelectedAccountIds,
   getTzzbStockTrades,
   getTzzbSyncMeta,
-  getTzzbYearPoints,
   refreshTzzbAccounts,
   setTzzbAccountScope,
   setTzzbSelectedAccountIds,
   startTzzbMcpAuth,
   waitTzzbMcpAuthorized,
 } from '../../../../common/api/tzzb.api.ts';
+import { fetchFullQuotes } from '../../../../common/api/quotes.api.ts';
+import { usePolling } from '../../../../common/composables/use-polling';
+import { POLLING_INTERVAL } from '../../../../common/constants/polling.constants.ts';
+import { buildTzzbHoldingSummary } from '../../../../common/utils/build-tzzb-holding-summary';
+import {
+  fetchTzzbScopeSnapshot,
+  TZZB_SNAPSHOT_TASK_TOTAL,
+  type TzzbSnapshotData,
+} from '../../../../common/api/tzzb-snapshot.api.ts';
+import {
+  getTzzbAutoSyncWatermark,
+  getTzzbCloseNodeMs,
+  isTzzbAutoSyncDue,
+  markTzzbSynced,
+  runTzzbAutoSync,
+} from '../../../../common/api/tzzb-auto-sync.api.ts';
+import { useTzzbScopeCacheStore } from '../../../../common/stores/tzzb-scope-cache';
+import {
+  TZZB_CUSTOM_RANGE_DEFAULT_FROM,
+  TZZB_CUSTOM_RANGE_DEFAULT_TO,
+  TZZB_SCOPE_KEY_ALL,
+} from '../../../../common/constants/tzzb-sync.constants.ts';
 import { useRouter } from 'vue-router';
 import { useStockOpen } from '../../../../common/composables/use-stock-open';
+import type {
+  FullQuote,
+} from '../../../../common/types/stock-quote.types.ts';
 import type {
   TzzbAccount,
   TzzbAssetChange,
@@ -55,6 +73,7 @@ import type {
   TzzbMonthCalendar,
   TzzbPnlSummary,
   TzzbPositionSummary,
+  TzzbScopeSnapshot,
   TzzbStockTrade,
   TzzbStockTradePage,
   TzzbSyncMeta,
@@ -72,6 +91,7 @@ import TzzbClearedPanel from './TzzbClearedPanel.vue';
 import TzzbClearedAnalysis from './TzzbClearedAnalysis.vue';
 import TzzbKindRank from './TzzbKindRank.vue';
 import TzzbTradeRecords from './TzzbTradeRecords.vue';
+import TzzbHoldingsPanel from './TzzbHoldingsPanel.vue';
 import TzzbFeeLedger from './TzzbFeeLedger.vue';
 import TzzbBehaviorDiag from './TzzbBehaviorDiag.vue';
 
@@ -212,21 +232,27 @@ const ensureAccounts = async (): Promise<void> => {
  * 恢复上次聚焦口径：账户仍存在且其快照在本地缓存中 → 秒开 + 静默后台刷新一次
  */
 const initAccounts = async (): Promise<void> => {
-  hydrateScopeCache();
+  scopeCacheStore.hydrate();
   await ensureAccounts();
   if (pickerOpen.value) return;
   dataInitialized = true;
-  const last = persistedLastScope;
-  if (last && last !== scopeKey() && (last === 'all' || accounts.value.some((a) => a.id === last))) {
-    selectedId.value = last === 'all' ? '' : last;
+  const last = scopeCacheStore.lastScope;
+  if (
+    last &&
+    last !== scopeKey() &&
+    (last === TZZB_SCOPE_KEY_ALL || accounts.value.some((a) => a.id === last))
+  ) {
+    selectedId.value = last === TZZB_SCOPE_KEY_ALL ? '' : last;
     applyAccountScope();
   }
-  const hit = scopeCache.get(scopeKey());
+  const hit = scopeCacheStore.get(scopeKey());
   if (hit) {
     applyScope(hit);
     // 缓存命中走 silent 分支（不改 loading），必须手动关骨架屏
     loading.value = false;
-    void loadAll('silent', { quiet: true });
+    // 增量口径（2026-11-11 王总指定）：快照已覆盖最近收盘节点不再重复后台拉取，
+    // 数据新鲜度由打开软件时的自动增量同步兜底；快照过时才静默补拉
+    if (hit.fetchedAt < getTzzbCloseNodeMs()) void loadAll('silent', { quiet: true });
     return;
   }
   void loadAll();
@@ -346,9 +372,9 @@ const position = ref<TzzbPositionSummary | null>(null);
 
 /** 资产曲线区间（父级持有；切换时重拉 queryPnlSummary，指标行区间盈亏 / 对比沪深300 联动） */
 const range = ref<string>('m1');
-/** 自定义区间起止（range = custom 时生效） */
-const customFrom = ref('2026-09-01');
-const customTo = ref('2026-10-23');
+/** 自定义区间起止（range = custom 时生效；默认值与自动同步快照共用常量） */
+const customFrom = ref(TZZB_CUSTOM_RANGE_DEFAULT_FROM);
+const customTo = ref(TZZB_CUSTOM_RANGE_DEFAULT_TO);
 
 /** 区间展示名（指标行「区间盈亏」副标题用） */
 const rangeLabel = computed(() => TZZB_RANGE_LABEL[range.value] ?? '本月');
@@ -388,6 +414,66 @@ const fundTrades = ref<TzzbFundTrade[]>([]);
 /** 摩擦账本全量流水（统计窗口内逐页合并，与交易记录首页共用一次首拉） */
 const allStockTrades = ref<TzzbStockTrade[] | null>(null);
 
+/* ---------------- 当前持仓 · 实时盈亏（2026-11-17 新增） ----------------
+ * 账本 MCP 的持仓 / 当日盈亏要等券商清算后才下发——由全历史成交流水回推出
+ * 当前持仓，结合实时行情与当日流水推算盘中实时盈亏；行情轮询间隔与设置页
+ * 「行情刷新间隔」一致（usePolling 取 settings.refreshIntervalMs 为生效档） */
+
+/** 全历史流水（当前账户范围；持仓回放源数据，默认 3 个月窗口会漏早期仓位） */
+const holdingTrades = ref<TzzbStockTrade[] | null>(null);
+
+/** 持仓标的实时报价映射（key 为 6 位纯代码，与 FullQuote.code 同形态） */
+const holdingQuotes = ref<Record<string, FullQuote>>({});
+
+/** 全历史流水拉取中（首载骨架屏） */
+const holdingLoading = ref(false);
+
+/** 持仓与当日盈亏推算汇总（流水 / 行情任一更新即重算） */
+const holdingSummary = computed(() => {
+  if (holdingTrades.value === null) return null;
+  return buildTzzbHoldingSummary(
+    holdingTrades.value,
+    holdingQuotes.value,
+    dayjs().format('YYYY-MM-DD'),
+  );
+});
+
+/**
+ * 拉取当前持仓 ∪ 当日成交标的的实时行情（轮询任务；无持仓静默跳过）
+ */
+const fetchHoldingQuotes = async (): Promise<void> => {
+  const symbols = holdingSummary.value?.symbols ?? [];
+  if (symbols.length === 0) return;
+  const quotes = await fetchFullQuotes(symbols);
+  holdingQuotes.value = Object.fromEntries(quotes.map((quote) => [quote.code, quote]));
+};
+
+/**
+ * 拉取持仓回放源流水：全历史接口优先（缓存命中秒回），失败回落摩擦账本的
+ * 近 3 个月流水（缺早期仓位但当日盈亏仍可用）
+ */
+const refreshHoldingTrades = async (): Promise<void> => {
+  if (holdingTrades.value === null) holdingLoading.value = true;
+  const full = await fetchTzzbHoldingTrades().catch(() => null);
+  holdingTrades.value = full ?? allStockTrades.value ?? [];
+  holdingLoading.value = false;
+  // 持仓清单可能已变化：立即补一轮行情（不等下一拍轮询）
+  void fetchHoldingQuotes();
+};
+
+/** 摩擦账本流水刷新（同步 / 切账户 / 快照回放）→ 持仓源流水跟着重取（缓存已随范围失效） */
+watch([selectedId, allStockTrades], () => {
+  void refreshHoldingTrades();
+});
+
+// 行情轮询：间隔取设置页「行情刷新间隔」为生效档（调度内核 max(设置值, 本下限)），
+// 交易窗口感知（A 股窗口外只请求一次）
+usePolling({
+  task: fetchHoldingQuotes,
+  intervalMs: POLLING_INTERVAL.QUOTES_INTRADAY,
+  tradingAware: true,
+});
+
 /** 最新净值点（当日盈亏口径：assetTrend 最后一个交易日；null = 无曲线数据） */
 const lastPoint = computed(() => {
   const trend = pnl.value?.assetTrend ?? [];
@@ -395,56 +481,23 @@ const lastPoint = computed(() => {
 });
 
 /* ---------------- 账户口径本地缓存（切换账户秒开，2026-11-10 王总指定） ----------------
- * 每个账户口径（含汇总）拉全量后快照到内存 + localStorage；再次切到该口径直接
- * 回放快照（连资产曲线区间状态一并恢复），不打上游、不进进度条，数据更新走手动同步 */
+ * 快照内存 + localStorage 持久化收敛在 tzzb-scope-cache store（打开软件的自动增量
+ * 同步在组件外刷新同一份缓存）；再次切到某口径直接回放快照（连资产曲线区间状态
+ * 一并恢复），不打上游、不进进度条，数据更新走手动同步 / 自动增量同步 */
 
-/**
- * 单个账户口径的数据快照（scopeCache 的值；range / 自定义区间一并快照，
- * 保证「指标行区间盈亏 / 资产曲线」口径与快照数据一致）
- */
-interface ScopeSnapshot {
-  syncMeta: TzzbSyncMeta | null;
-  pnl: TzzbPnlSummary | null;
-  position: TzzbPositionSummary | null;
-  assetChange: TzzbAssetChange | null;
-  dayCal: TzzbDayCalendar | null;
-  monthCal: TzzbMonthCalendar | null;
-  yearPoints: TzzbYearPoint[];
-  cleared: TzzbClearedPosition[];
-  fundReturns: TzzbHoldingReturn[];
-  fundCycles: TzzbFundCycle[];
-  stockTrades: TzzbStockTradePage | null;
-  allStockTrades: TzzbStockTrade[] | null;
-  fundTrades: TzzbFundTrade[];
-  range: string;
-  customFrom: string;
-  customTo: string;
-  fetchedAt: number;
-}
-
-/** localStorage 持久化键（含 lastScope，重启后恢复上次聚焦口径） */
-const SCOPE_CACHE_STORAGE_KEY = 'tzzb.scopeCache.v1';
-
-/** 缓存条目上限（超出淘汰最旧，防 localStorage 超限） */
-const SCOPE_CACHE_MAX = 8;
-
-/** 账户口径缓存（key = 账户 id；'all' = 汇总口径） */
-const scopeCache = new Map<string, ScopeSnapshot>();
-
-/** hydrate 时读出的上次聚焦口径（initAccounts 恢复用） */
-let persistedLastScope: string | null = null;
+const scopeCacheStore = useTzzbScopeCacheStore();
 
 /**
  * 当前缓存口径 key
- * @returns 账户 id；'' / 'all' = 汇总口径
+ * @returns 账户 id；'' = 汇总口径（TZZB_SCOPE_KEY_ALL）
  */
-const scopeKey = (): string => selectedId.value || 'all';
+const scopeKey = (): string => selectedId.value || TZZB_SCOPE_KEY_ALL;
 
 /**
  * 快照当前口径的全部数据引用（浅拷贝即可：各 ref 整体替换不原地改）
  * @returns 快照对象
  */
-const captureScope = (): ScopeSnapshot => ({
+const captureScope = (): TzzbScopeSnapshot => ({
   syncMeta: syncMeta.value,
   pnl: pnl.value,
   position: position.value,
@@ -468,7 +521,7 @@ const captureScope = (): ScopeSnapshot => ({
  * 回放快照到页面状态（含 range / 自定义区间；恢复窗口内屏蔽区间 watcher 的重拉）
  * @param s 目标快照
  */
-const applyScope = (s: ScopeSnapshot): void => {
+const applyScope = (s: TzzbScopeSnapshot): void => {
   applyingSnapshot = true;
   syncMeta.value = s.syncMeta;
   pnl.value = s.pnl;
@@ -489,36 +542,6 @@ const applyScope = (s: ScopeSnapshot): void => {
   void nextTick().then(() => {
     applyingSnapshot = false;
   });
-};
-
-/**
- * 持久化缓存到 localStorage（含 lastScope；超限 / 坏数据静默放弃，不影响主流程）
- */
-const persistScopeCache = (): void => {
-  try {
-    const entries = [...scopeCache.entries()].slice(-SCOPE_CACHE_MAX);
-    localStorage.setItem(
-      SCOPE_CACHE_STORAGE_KEY,
-      JSON.stringify({ lastScope: scopeKey(), entries }),
-    );
-  } catch {
-    /* 容量超限等：放弃持久化，内存缓存仍生效 */
-  }
-};
-
-/**
- * 从 localStorage 恢复缓存与上次聚焦口径（坏数据静默忽略）
- */
-const hydrateScopeCache = (): void => {
-  try {
-    const raw = localStorage.getItem(SCOPE_CACHE_STORAGE_KEY);
-    if (!raw) return;
-    const parsed = JSON.parse(raw) as { lastScope?: string; entries?: [string, ScopeSnapshot][] };
-    for (const [k, v] of parsed.entries ?? []) scopeCache.set(k, v);
-    persistedLastScope = typeof parsed.lastScope === 'string' ? parsed.lastScope : null;
-  } catch {
-    /* 坏数据：忽略，走正常网络首载 */
-  }
 };
 
 /** 数据层账户范围跟随当前聚焦口径（切账户 / 恢复上次口径共用） */
@@ -918,16 +941,40 @@ const selectedName = computed(
 
 /* ---------------- 加载 ---------------- */
 
-/** 同步任务总数（loadAll 并行任务数，进度条分母；账户列表走独立缓存初始化，不计入） */
-const SYNC_TASK_TOTAL = 12;
+/** 同步任务总数（进度条分母；任务清单与打开软件自动增量同步共用） */
+const SYNC_TASK_TOTAL = TZZB_SNAPSHOT_TASK_TOTAL;
 
 /** 同步进度（null = 未在同步；done/total 驱动顶栏进度条） */
 const syncProgress = ref<{ done: number; total: number } | null>(null);
 
 /**
- * 拉取全部模块（并行启动；单模块失败不影响其余，各自落空态，
+ * 将成功任务的数据段写入页面状态（失败字段缺省保留旧值，避免闪空）
+ * @param data 快照数据段（仅含成功字段）
+ */
+const applySnapshotData = (data: Partial<TzzbSnapshotData>): void => {
+  if ('syncMeta' in data) syncMeta.value = data.syncMeta ?? null;
+  if ('pnl' in data) pnl.value = data.pnl ?? null;
+  if ('position' in data) position.value = data.position ?? null;
+  if ('assetChange' in data) assetChange.value = data.assetChange ?? null;
+  if ('dayCal' in data) dayCal.value = data.dayCal ?? null;
+  if ('monthCal' in data) monthCal.value = data.monthCal ?? null;
+  if ('yearPoints' in data) yearPoints.value = data.yearPoints ?? [];
+  if ('cleared' in data) cleared.value = data.cleared ?? [];
+  if ('fundReturns' in data) fundReturns.value = data.fundReturns ?? [];
+  if ('fundCycles' in data) fundCycles.value = data.fundCycles ?? [];
+  if ('stockTrades' in data) {
+    stockTrades.value = data.stockTrades ?? null;
+    // 摩擦账本口径：首页分页结构里的 list 已合并全量页
+    allStockTrades.value = data.allStockTrades ?? null;
+  }
+  if ('fundTrades' in data) fundTrades.value = data.fundTrades ?? [];
+};
+
+/**
+ * 拉取全部模块（并行启动；单模块失败不影响其余，各自落空态保留旧值，
  * 失败原因原样透出——上游报什么就展示什么，不做拦截加工与自动重试）。
- * 完成后把当前口径快照进本地缓存（切换回来秒开）
+ * 任务清单与自动增量同步共用 fetchTzzbScopeSnapshot（tzzb-snapshot.api.ts）。
+ * 完成后把当前口径快照进本地缓存（切换回来秒开），全量成功推进同步水位
  * @param mode skeleton = 首载（显示骨架屏）；silent = 手动同步 / 切账户（保留旧数据，只走进度条）
  * @param opts 可选项
  * @param opts.quiet true = 完全静默后台刷新（不进进度条，用于缓存命中后的保活刷新）
@@ -944,50 +991,18 @@ const loadAll = async (
     done += 1;
     if (!opts.quiet) syncProgress.value = { done, total: SYNC_TASK_TOTAL };
   };
-  const results = await Promise.allSettled([
-    getTzzbSyncMeta().finally(bump),
-    // 按当前选中的区间取数（默认 m1）：切账户整拉时页签停在「近三月」等
-    // 非默认区间，取默认区间会导致曲线与页签口径不一致（2026-11-10 王总反馈）
-    getTzzbPnlSummary(range.value).finally(bump),
-    getTzzbPositionSummary().finally(bump),
-    getTzzbAssetChange().finally(bump),
-    getTzzbDayCalendar(dayjs().format('YYYYMM')).finally(bump),
-    getTzzbMonthCalendar(dayjs().format('YYYY')).finally(bump),
-    getTzzbYearPoints([dayjs().format('YYYY'), dayjs().subtract(1, 'year').format('YYYY')]).finally(bump),
-    getTzzbClearedPositions().finally(bump),
-    getTzzbFundHoldingReturns().finally(bump),
-    getTzzbFundCycles().finally(bump),
-    fetchTzzbAllStockTrades().finally(bump),
-    getTzzbFundTrades(dayjs().format('YYYY-MM')).finally(bump),
-  ]);
-  const [meta, pnlR, posR, chgR, dayR, monR, yearR, clrR, fundRetR, fundCycR, tradeR, fundTradeR] = results;
-  if (meta.status === 'fulfilled') syncMeta.value = meta.value;
-  if (pnlR.status === 'fulfilled') pnl.value = pnlR.value;
-  if (posR.status === 'fulfilled') position.value = posR.value;
-  if (chgR.status === 'fulfilled') assetChange.value = chgR.value;
-  if (dayR.status === 'fulfilled') dayCal.value = dayR.value;
-  if (monR.status === 'fulfilled') monthCal.value = monR.value;
-  if (yearR.status === 'fulfilled') yearPoints.value = yearR.value;
-  if (clrR.status === 'fulfilled') cleared.value = clrR.value;
-  if (fundRetR.status === 'fulfilled') fundReturns.value = fundRetR.value;
-  if (fundCycR.status === 'fulfilled') fundCycles.value = fundCycR.value;
-  if (tradeR.status === 'fulfilled') {
-    stockTrades.value = tradeR.value;
-    // 摩擦账本口径：首页分页结构里的 list 已合并全量页
-    allStockTrades.value = tradeR.value?.list ?? null;
-  }
-  if (fundTradeR.status === 'fulfilled') fundTrades.value = fundTradeR.value;
+  const { data, errors } = await fetchTzzbScopeSnapshot(range.value, { onTaskDone: bump });
+  applySnapshotData(data);
   syncProgress.value = null;
   if (mode === 'skeleton') loading.value = false;
   // 本口径数据落缓存（内存 + localStorage），再次切入秒开
-  scopeCache.set(scopeKey(), captureScope());
-  persistScopeCache();
+  scopeCacheStore.save(scopeKey(), captureScope());
+  scopeCacheStore.setLastScope(scopeKey());
+  // 全部任务成功才推进自动增量同步水位（任一失败：下次打开软件自动补拉）
+  if (errors.length === 0) markTzzbSynced();
   // 上游 401 感知：access token 过期且 refresh 被上游拒绝（invalid_client）——
   // 自动拉起浏览器重新授权（对齐 Claude 客户端行为），授权落盘后自动同步
-  const unauthorized = results.some(
-    (r): r is PromiseRejectedResult =>
-      r.status === 'rejected' && UPSTREAM_401_PATTERN.test(String(r.reason)),
-  );
+  const unauthorized = errors.some((e) => UPSTREAM_401_PATTERN.test(String(e)));
   if (unauthorized) void autoReauthOn401();
 };
 
@@ -1006,13 +1021,20 @@ onMounted(() => {
 const onSelectAccount = (id: string): void => {
   if (id === selectedId.value) return;
   // 离开前把当前口径快照进缓存（回来时秒开）
-  scopeCache.set(scopeKey(), captureScope());
-  persistScopeCache();
+  scopeCacheStore.save(scopeKey(), captureScope());
   selectedId.value = id;
+  scopeCacheStore.setLastScope(scopeKey());
   applyAccountScope();
-  const hit = scopeCache.get(scopeKey());
+  const hit = scopeCacheStore.get(scopeKey());
   if (hit) {
     applyScope(hit);
+    // 快照过时（越过收盘节点）：回放秒开后静默补拉（进度条反馈，不闪骨架屏）
+    if (hit.fetchedAt < getTzzbCloseNodeMs()) {
+      syncing.value = true;
+      void loadAll('silent').finally(() => {
+        syncing.value = false;
+      });
+    }
     return;
   }
   syncing.value = true;
@@ -1030,6 +1052,40 @@ const onSync = async (): Promise<void> => {
   await ensureAccounts();
   if (!pickerOpen.value) await loadAll('silent');
   syncing.value = false;
+};
+
+/**
+ * 自动增量同步（菜单「自动增量同步」，2026-11-11 王总指定实装）：
+ * 打开软件时由 MainLayout 启动钩子自动执行（tzzb-auto-sync.api.ts，收盘节点水位
+ * 判定）；菜单入口为状态透出 + 立即补拉——水位已覆盖最近收盘节点时浮窗展示状态，
+ * 未覆盖（新收盘定稿未拉）时立即后台补拉，汇总口径数据就绪后直接回放新快照
+ */
+const onAutoSync = async (): Promise<void> => {
+  if (!isTzzbAutoSyncDue()) {
+    const watermark = getTzzbAutoSyncWatermark();
+    notifications.push({
+      title: '自动增量同步已开启',
+      body: `每次打开软件自动同步已选账户数据；已同步至最近收盘节点（${
+        watermark ? dayjs(watermark.lastSyncAt).format('MM-DD HH:mm') : '—'
+      }），收盘后打开会自动补拉`,
+      tone: NOTIFY_TONE.FLAT,
+    });
+    return;
+  }
+  syncing.value = true;
+  const result = await runTzzbAutoSync({ notify: true }).finally(() => {
+    syncing.value = false;
+  });
+  if (result.status === 'skipped') {
+    // 从未确认同步账户：走手动同步流程（补账户列表 / 首次勾选弹窗）
+    await onSync();
+    return;
+  }
+  if (result.status === 'synced' && scopeKey() === TZZB_SCOPE_KEY_ALL) {
+    // 刷新的是组件外口径缓存，当前页面的 refs 需手动回放新快照
+    const snapshot = scopeCacheStore.get(TZZB_SCOPE_KEY_ALL);
+    if (snapshot) applyScope(snapshot);
+  }
 };
 
 /**
@@ -1211,6 +1267,7 @@ const openStockDetailPage = (code: string): void => {
         :refreshing-accounts="refreshingAccounts"
         @select="onSelectAccount"
         @sync="onSync"
+        @auto-sync="onAutoSync"
         @reauth="onReauth"
         @clear-auth="onClearAuth"
         @select-accounts="onSelectAccounts"
@@ -1266,6 +1323,16 @@ const openStockDetailPage = (code: string): void => {
         :range-label="rangeLabel === '自定义区间' ? `${customFrom} ~ ${customTo}` : rangeLabel"
         :hs300-rate="hs300Rate"
       />
+
+      <!-- ①.5 当前持仓 · 实时盈亏（流水回放 + 实时行情推算；基金账户不展示） -->
+      <BaseCard v-if="focusKind !== 'fund'" title="当前持仓 · 实时盈亏">
+        <TzzbHoldingsPanel
+          :summary="holdingSummary"
+          :loading="holdingLoading"
+          @open="openStockDetail"
+          @open-page="openStockDetailPage"
+        />
+      </BaseCard>
 
       <!-- ② 资产曲线 + 区间资金变动 -->
       <div class="grid shrink-0 gap-3 xl:grid-cols-3">
