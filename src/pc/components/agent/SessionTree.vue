@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { reactive, ref } from 'vue';
+import { computed, reactive, ref } from 'vue';
 import { VueDraggable } from 'vue-draggable-plus';
 import { useAgentStore } from '@/common/stores/agent';
 import { UNGROUPED_LABEL, SESSION_DEFAULT_TITLE } from '@/common/constants/agent.constants';
@@ -16,6 +16,7 @@ import { formatRelativeTime } from '@/common/utils/format-relative-time';
  * - 分组可折叠、可拖拽排序（grip 手柄）；末尾固定「未分组」兜底组（不参与组排序）；
  * - 会话行 = 标题 + 灰色相对时间；hover 出 ⋯ 菜单（重命名/移动分组/置顶/删除）；
  * - 会话拖拽支持跨组移动（同一 drag group）；置顶会话始终浮在组内最前；
+ * - 批量删除：侧栏「会话」标题行垃圾桶唤起勾选模式（全选/逐条勾选 → 二次确认批量删）；
  * - 删除均有二次确认；会话删除级联删消息。
  */
 const store = useAgentStore();
@@ -91,9 +92,30 @@ const moveModalOpen = ref(false);
 const moveSessionId = ref<number | null>(null);
 const moveTargetGroupId = ref<number | null>(null);
 
-/** 删除确认（session/group 共用） */
-const deleteTarget = ref<{ kind: 'session' | 'group'; id: number; label: string } | null>(null);
+/** 删除确认（session/group/batch 共用） */
+const deleteTarget = ref<{ kind: 'session' | 'group' | 'batch'; id: number; label: string } | null>(
+  null,
+);
 const deleteModalOpen = ref(false);
+
+/** 删除确认弹窗标题（session / group / batch 三态共用） */
+const confirmTitle = computed(() => {
+  if (deleteTarget.value?.kind === 'group') return '删除分组';
+  if (deleteTarget.value?.kind === 'batch') return '批量删除会话';
+  return '删除会话';
+});
+
+/** 删除确认弹窗正文（batch 态文案随勾选数变化） */
+const confirmContent = computed(() => {
+  const target = deleteTarget.value;
+  if (target?.kind === 'group') {
+    return `删除分组「${target.label}」？组内会话将移入「${UNGROUPED_LABEL}」。`;
+  }
+  if (target?.kind === 'batch') {
+    return `删除选中的 ${selectedIds.value.size} 个会话及其全部消息，不可恢复。`;
+  }
+  return `删除会话「${target?.label ?? SESSION_DEFAULT_TITLE}」及其全部消息，不可恢复。`;
+});
 
 /**
  * 打开重命名弹窗
@@ -147,12 +169,16 @@ const confirmMove = (): void => {
   moveModalOpen.value = false;
 };
 
-/** 确认删除（危险操作，会话级联删消息 / 分组会话回落未分组） */
+/** 确认删除（危险操作，会话级联删消息 / 分组会话回落未分组 / 批量级联删消息） */
 const confirmDelete = (): void => {
   if (!deleteTarget.value) return;
   const { kind, id } = deleteTarget.value;
   if (kind === 'session') void store.removeSession(id);
-  else void store.removeGroup(id);
+  else if (kind === 'group') void store.removeGroup(id);
+  else {
+    void store.removeSessions([...selectedIds.value]);
+    exitBatchMode();
+  }
   deleteModalOpen.value = false;
 };
 
@@ -163,11 +189,70 @@ const confirmNewGroup = (): void => {
   newGroupModalOpen.value = false;
 };
 
-/** 供收起态侧栏直接唤起新建分组弹窗（BaseModal Teleport 到 body，不受 inert 层影响） */
+/* --------------------------------- 批量删除 -------------------------------- */
+
+/** 批量删除模式（会话行进入勾选态，点击行=勾选/取消勾选） */
+const batchMode = ref(false);
+
+/** 已勾选的会话 id 集合 */
+const selectedIds = ref<ReadonlySet<number>>(new Set());
+
+/** 是否已全选（对照当前全部会话） */
+const allSelected = computed(
+  () => store.sessions.length > 0 && store.sessions.every((s) => selectedIds.value.has(s.id)),
+);
+
+/**
+ * 切换某会话勾选态（不可变更新，保证 computed / 视图可靠刷新）
+ * @param id 会话 id
+ */
+const toggleSelected = (id: number): void => {
+  const next = new Set(selectedIds.value);
+  if (next.has(id)) {
+    next.delete(id);
+  } else {
+    next.add(id);
+  }
+  selectedIds.value = next;
+};
+
+/** 全选 / 清空勾选 */
+const toggleSelectAll = (): void => {
+  selectedIds.value = allSelected.value ? new Set<number>() : new Set(store.sessions.map((s) => s.id));
+};
+
+/** 退出批量模式并清空勾选 */
+const exitBatchMode = (): void => {
+  batchMode.value = false;
+  selectedIds.value = new Set<number>();
+};
+
+/**
+ * 进入 / 退出批量删除模式（AgentSidebar「会话」标题行垃圾桶按钮唤起）
+ */
+const toggleBatchMode = (): void => {
+  if (batchMode.value) {
+    exitBatchMode();
+  } else {
+    // 进入勾选模式：勾选集此刻必为空（初始空 / 退出时已清空），无需重置
+    batchMode.value = true;
+    closeMenu();
+  }
+};
+
+/** 批量删除确认弹窗（勾选数 > 0 时可发起） */
+const openBatchConfirm = (): void => {
+  if (selectedIds.value.size === 0) return;
+  deleteTarget.value = { kind: 'batch', id: 0, label: '' };
+  deleteModalOpen.value = true;
+};
+
+/** 供收起态侧栏直接唤起新建分组弹窗 / 「会话」标题行唤起批量删除（BaseModal Teleport 到 body，不受 inert 层影响） */
 defineExpose({
   openNewGroup: (): void => {
     newGroupModalOpen.value = true;
   },
+  toggleBatchMode,
 });
 
 /* --------------------------------- 会话选择 -------------------------------- */
@@ -183,6 +268,29 @@ const selectSession = (id: number): void => {
 
 <template>
   <div class="space-y-1">
+    <!-- 批量删除工具条（垃圾桶入口进入；全选 + 已选计数 + 删除/取消） -->
+    <div
+      v-if="batchMode"
+      class="flex items-center justify-between rounded-lg border border-flat-weak px-2 py-1.5"
+    >
+      <label class="flex cursor-pointer items-center gap-1.5 text-xs text-text-secondary">
+        <input
+          type="checkbox"
+          class="accent-primary"
+          :checked="allSelected"
+          @change="toggleSelectAll"
+        />
+        全选
+      </label>
+      <div class="flex items-center gap-1.5">
+        <span class="text-xs text-text-tertiary">已选 {{ selectedIds.size }}</span>
+        <BaseButton variant="danger" :disabled="selectedIds.size === 0" @click="openBatchConfirm">
+          删除
+        </BaseButton>
+        <BaseButton variant="ghost" @click="exitBatchMode">取消</BaseButton>
+      </div>
+    </div>
+
     <!-- 分组列表（grip 手柄拖拽排序） -->
     <VueDraggable
       :model-value="store.groups.map((g) => g.id)"
@@ -284,7 +392,16 @@ const selectSession = (id: number): void => {
               store.currentSessionId === session.id ? 'bg-flat-weak' : 'hover:bg-flat-weak/60'
             "
           >
+            <input
+              v-if="batchMode"
+              type="checkbox"
+              class="ml-1 shrink-0 accent-primary"
+              :checked="selectedIds.has(session.id)"
+              aria-label="选择会话"
+              @click.stop="toggleSelected(session.id)"
+            />
             <MenuIcon
+              v-else
               name="grip"
               :size="14"
               class="session-handle absolute left-0 hidden cursor-grab text-text-tertiary active:cursor-grabbing group-hover/session:block"
@@ -292,7 +409,7 @@ const selectSession = (id: number): void => {
             <button
               type="button"
               class="flex min-w-0 flex-1 items-center gap-2 py-2 pl-2 pr-1 text-left"
-              @click="selectSession(session.id)"
+              @click="batchMode ? toggleSelected(session.id) : selectSession(session.id)"
             >
               <MenuIcon
                 v-if="session.pinned"
@@ -314,7 +431,7 @@ const selectSession = (id: number): void => {
                 {{ formatRelativeTime(session.updatedAt) }}
               </span>
             </button>
-            <div class="relative pr-1">
+            <div v-if="!batchMode" class="relative pr-1">
               <button
                 type="button"
                 class="rounded p-1 text-text-tertiary opacity-0 hover:bg-flat-weak hover:text-text group-hover/session:opacity-100"
@@ -405,7 +522,16 @@ const selectSession = (id: number): void => {
           class="group/session relative flex items-center rounded-lg"
           :class="store.currentSessionId === session.id ? 'bg-flat-weak' : 'hover:bg-flat-weak/60'"
         >
+          <input
+            v-if="batchMode"
+            type="checkbox"
+            class="ml-1 shrink-0 accent-primary"
+            :checked="selectedIds.has(session.id)"
+            aria-label="选择会话"
+            @click.stop="toggleSelected(session.id)"
+          />
           <MenuIcon
+            v-else
             name="grip"
             :size="14"
             class="session-handle absolute left-0 hidden cursor-grab text-text-tertiary active:cursor-grabbing group-hover/session:block"
@@ -413,7 +539,7 @@ const selectSession = (id: number): void => {
           <button
             type="button"
             class="flex min-w-0 flex-1 items-center gap-2 py-2 pl-2 pr-1 text-left"
-            @click="selectSession(session.id)"
+            @click="batchMode ? toggleSelected(session.id) : selectSession(session.id)"
           >
             <MenuIcon v-if="session.pinned" name="pin" :size="12" class="shrink-0 text-primary" />
             <span
@@ -428,7 +554,7 @@ const selectSession = (id: number): void => {
               {{ formatRelativeTime(session.updatedAt) }}
             </span>
           </button>
-          <div class="relative pr-1">
+          <div v-if="!batchMode" class="relative pr-1">
             <button
               type="button"
               class="rounded p-1 text-text-tertiary opacity-0 hover:bg-flat-weak hover:text-text group-hover/session:opacity-100"
@@ -571,12 +697,8 @@ const selectSession = (id: number): void => {
     <!-- 删除确认 -->
     <BaseConfirmModal
       v-model:open="deleteModalOpen"
-      :title="deleteTarget?.kind === 'group' ? '删除分组' : '删除会话'"
-      :content="
-        deleteTarget?.kind === 'group'
-          ? `删除分组「${deleteTarget?.label}」？组内会话将移入「${UNGROUPED_LABEL}」。`
-          : `删除会话「${deleteTarget?.label ?? SESSION_DEFAULT_TITLE}」及其全部消息，不可恢复。`
-      "
+      :title="confirmTitle"
+      :content="confirmContent"
       ok-text="删除"
       ok-variant="danger"
       @ok="confirmDelete"

@@ -1,5 +1,9 @@
 import dayjs from 'dayjs';
-import { TZZB_TRADE_FETCH_MAX_PAGES } from '../types/tzzb.types.ts';
+import {
+  TZZB_HOLDING_TRADE_FETCH_MAX_PAGES,
+  TZZB_TRADE_FETCH_MAX_PAGES,
+} from '../types/tzzb.types.ts';
+import { TZZB_HOLDING_TRADE_START_DATE } from '../constants/tzzb-holding.constants.ts';
 import {
   TZZB_INDEX_NAME,
   type TzzbAccount,
@@ -234,6 +238,8 @@ let scopeAccountIds: string[] | null = null;
  */
 export const setTzzbAccountScope = (accountIds: string[] | null): void => {
   scopeAccountIds = accountIds;
+  // 范围变更后持仓回放流水口径已失效（当前持仓面板换账户重拉）
+  holdingTradesCache = null;
 };
 
 /** promptAccountSelection 分组响应形态 */
@@ -776,6 +782,8 @@ let allStockTradesCache: TzzbStockTrade[] | null = null;
  * @returns 首页分页结构（list 已合并全量页）；未配置代理 / 调用失败时返回 null
  */
 export const fetchTzzbAllStockTrades = async (): Promise<TzzbStockTradePage | null> => {
+  // 上游可能新增盘中成交：摩擦账本流水刷新后持仓回放缓存一并失效（下次取数重拉）
+  holdingTradesCache = null;
   const first = await getTzzbStockTrades('1');
   if (!first) return null;
   const list = [...first.list];
@@ -799,6 +807,42 @@ export const fetchTzzbAllStockTrades = async (): Promise<TzzbStockTradePage | nu
 export const getTzzbAllStockTrades = async (): Promise<TzzbStockTrade[]> => {
   if (allStockTradesCache) return allStockTradesCache;
   return (await fetchTzzbAllStockTrades())?.list ?? [];
+};
+
+/** 持仓回放全历史流水内存缓存（key 隐含账户范围：setTzzbAccountScope / 全量流水刷新时失效） */
+let holdingTradesCache: TzzbStockTrade[] | null = null;
+
+/**
+ * 失效持仓回放流水缓存（账户范围变化 / 全量流水重拉后由数据层自动触发；
+ * 持仓面板下次取数重拉全历史）
+ */
+export const invalidateTzzbHoldingTradesCache = (): void => {
+  holdingTradesCache = null;
+};
+
+/**
+ * 拉取当前账户范围的全历史股票流水（当前持仓面板回放专用）
+ *
+ * 仪表盘的摩擦账本流水默认近 3 个月窗口——早于窗口开仓且窗口内未交易的持仓
+ * 会被漏掉，故这里从账本数据起始日（TZZB_HOLDING_TRADE_START_DATE）拉满全历史，
+ * 分页上限独立放宽（TZZB_HOLDING_TRADE_FETCH_MAX_PAGES）。
+ * 缓存命中直接返回；账户范围变更 / 全量流水重拉时缓存自动失效。
+ * @returns 全历史流水列表；未配置代理 / 调用失败时返回 null
+ */
+export const fetchTzzbHoldingTrades = async (): Promise<TzzbStockTrade[] | null> => {
+  if (holdingTradesCache) return holdingTradesCache;
+  const range = { startDate: TZZB_HOLDING_TRADE_START_DATE };
+  const first = await getTzzbStockTrades('1', range);
+  if (!first) return null;
+  const list = [...first.list];
+  const maxPage = Math.min(first.maxPage, TZZB_HOLDING_TRADE_FETCH_MAX_PAGES);
+  for (let page = 2; page <= maxPage; page += 1) {
+    const next = await getTzzbStockTrades(String(page), range);
+    if (!next || next.list.length === 0) break;
+    list.push(...next.list);
+  }
+  holdingTradesCache = list;
+  return list;
 };
 
 /**

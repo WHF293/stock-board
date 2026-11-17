@@ -19,7 +19,8 @@ export const ROUTE_PATH = {
   MARKET_RANK: "/market-rank",
   STOCK_MARKET: "/stock-market", // 大A个股（原个股行情页 2026-10-22 并入行情全景，2026-11-06 随行情全景拆分恢复独立页，盘面雷达页头按钮进入，不入菜单）
   HK_STOCK: "/hk-stock", // 港股个股（原行情全景「港股个股」页签，2026-11-06 随拆分独立成页，盘面雷达页头按钮进入，不入菜单）
-  LEADERS: "/leaders", // 龙头（原行情全景「行业龙头」页签，2026-11-06 随拆分独立成页，市场总览页头按钮进入，不入菜单）
+  LEADERS: "/leaders", // 龙头（原行情全景「行业龙头」页签，2026-11-06 随拆分独立成页；入口已于 2026-11-17
+  //   移入「板块题材」页 tab（板块龙头 / 题材龙头），市场总览页头按钮删除，路由保留兼容旧链接）
   BOARD_FLOW: "/board-flow", // 板块资金流向（原「行情全景-最新板块资金」独立成页，2026-10-13）
   HEATMAP: "/heatmap", // 大盘云图（2026-10-29 起转插件分发：dsh-dapanyuntu 注册本路径；总览「板块热力」卡标题入口仍指向这里）
   MARKET_BREADTH: "/market-breadth", // 市场宽度（2026-10-29 起转插件分发：dsh-market-breadth 注册本路径；总览宽度卡的深化页入口仍指向这里）
@@ -92,8 +93,9 @@ export const MENU_ITEMS: readonly SidebarMenuEntry[] = [
   { path: ROUTE_PATH.BOARD_FLOW, title: "资金流向", icon: MENU_ICON.FUNDS, group: SIDEBAR_MENU_GROUP.MARKET },
   // 大盘云图侧栏入口已移除（2026-10-22 王总指定），改为市场总览页头「大盘云图」按钮进入（同宽基ETF入口位）；
   // 页面 2026-10-29 起转插件分发（dsh-dapanyuntu 注册 /heatmap，不入菜单）
-  // 板块日历：同为「板块维度的行情视角」（原紧跟行情全景条目，2026-11-06 行情全景拆分后紧随资金流向）
-  { path: ROUTE_PATH.BOARD_CALENDAR, title: "板块分析", icon: MENU_ICON.CALENDAR, group: SIDEBAR_MENU_GROUP.MARKET },
+  // 板块题材（原「板块分析」，2026-11-17 王总指定更名）：同为「板块维度的行情视角」
+  //  （原紧跟行情全景条目，2026-11-06 行情全景拆分后紧随资金流向）；同日龙头入口移入本页 tab
+  { path: ROUTE_PATH.BOARD_CALENDAR, title: "板块题材", icon: MENU_ICON.CALENDAR, group: SIDEBAR_MENU_GROUP.MARKET },
   // 市场广度指标：五大广度副图（ADL/ADR/OBOS/ARMS/MCO），市场总览宽度卡的深化页
   // 市场宽度（2026-10-29 起转插件分发：菜单与 /market-breadth 路由由 dsh-market-breadth 注册）
   // 期货总览侧栏入口已移除（2026-11-06 王总指定）：/futures/overview 路由保留，
@@ -101,8 +103,9 @@ export const MENU_ITEMS: readonly SidebarMenuEntry[] = [
   // 侧栏两大分组（2026-11-06 王总指定）：原「热点资讯 / 自选与账户」组撤销，以下页面全部并入市场行情组
   { path: ROUTE_PATH.WATCHLIST, title: "自选股", icon: MENU_ICON.STAR, group: SIDEBAR_MENU_GROUP.MARKET },
   // 选股器已改为插件分发（dsh-stock-screener），由插件注册菜单与 /screener 路由
-  { path: ROUTE_PATH.HOT_NEWS, title: "热点新闻", icon: MENU_ICON.NEWS, group: SIDEBAR_MENU_GROUP.MARKET },
-  // 今天炒什么紧跟热点新闻：同为「盘前 / 盘中扫一眼市场在炒什么」的日常视角
+  // 热点新闻侧栏入口已移除（2026-11-17 王总指定）：整个页面并入「今天炒什么」第二个 tab，
+  // 新闻源设置跟着移入该页页头；/hot-news 路由保留（兼容旧链接 / 收藏，已无菜单入口）
+  // 今天炒什么（含 今天题材 / 热点新闻 / 股票热榜 / ETF 热榜 四 tab，顺序可页签设置）：「盘前 / 盘中扫一眼市场在炒什么」的日常视角
   { path: ROUTE_PATH.WHAT_TO_TRADE, title: "今天炒什么", icon: MENU_ICON.FLAME, group: SIDEBAR_MENU_GROUP.MARKET },
   { path: ROUTE_PATH.STOCK_ACCOUNT, title: "账户分析", icon: MENU_ICON.ACCOUNT, group: SIDEBAR_MENU_GROUP.MARKET },
   // 插件工坊侧栏入口已移除（2026-10-29 王总指定），改为顶栏 Agent 分析之后的插头图标进入；

@@ -48,6 +48,8 @@ import { useStockOpen } from "../../common/composables/use-stock-open";
 import { useMarketStatusStore } from "../../common/stores/market-status";
 import { useSettingsStore } from "../../common/stores/settings";
 import { useUiStore } from "../../common/stores/ui";
+import { runTzzbAutoSync } from "../../common/api/tzzb-auto-sync.api.ts";
+import { TZZB_BOOT_SYNC_DELAY_MS } from "../../common/constants/tzzb-sync.constants.ts";
 import { trackAction } from "../weblog/weblogActions";
 import type { SearchResult } from "../../common/types/stock-quote.types.ts";
 import type { WatchWidgetOpenUrlPayload } from "../../common/types/watch-widget.types.ts";
@@ -614,6 +616,11 @@ const onGlobalKeydown = (event: KeyboardEvent): void => {
 
 onMounted(() => {
   document.addEventListener("keydown", onGlobalKeydown, true);
+  // 投资账本自动增量同步（2026-11-11 王总指定）：每次打开软件后台静默同步已选账户
+  // 数据，水位越过最近收盘节点才拉取（详见 tzzb-auto-sync.api.ts）；延迟启动避让首屏行情请求
+  window.setTimeout(() => {
+    void runTzzbAutoSync({ notify: true });
+  }, TZZB_BOOT_SYNC_DELAY_MS);
   // 盯盘小组件气泡「新闻原文」点击：气泡窗口 focusable:false 且无 shell 权限，
   // 经 open-url 事件交主窗口用与热点新闻页一致的窗口逻辑打开（仅桌面端有气泡窗口）
   if (isTauri()) {

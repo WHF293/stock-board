@@ -115,10 +115,8 @@ const goPanorama = (): void => {
   void router.push(ROUTE_PATH.PANORAMA);
 };
 
-/** 跳龙头页（页头按钮入口，2026-11-06 行情全景拆分） */
-const goLeaders = (): void => {
-  void router.push(ROUTE_PATH.LEADERS);
-};
+/** 跳龙头页：入口已于 2026-11-17 移入「板块题材」页 tab（板块龙头 / 题材龙头），页头按钮删除；
+ *  /leaders 路由保留（外部旧链接 / 收藏不断） */
 
 /** 跳期货总览页（页头按钮入口，2026-11-06 王总指定：侧栏入口移除改页头按钮） */
 const goFutures = (): void => {
@@ -474,8 +472,8 @@ const isDistributionReady = computed(() => distribution.value.length > 0);
 
 <template>
   <div class="space-y-6">
-    <!-- 页头快捷入口：期货（2026-11-06 侧栏入口移除改页头按钮）+ 龙头 / 全景
-        （2026-11-06 行情全景拆分，原行业龙头 / 全景页签独立成页）+ 宽基ETF
+    <!-- 页头快捷入口：期货（2026-11-06 侧栏入口移除改页头按钮）+ 全景
+        （2026-11-06 行情全景拆分，原全景页签独立成页；龙头按钮 2026-11-17 移入板块题材页 tab）+ 宽基ETF
         （大盘云图按钮 2026-10-31 移除，入口迁侧栏「插件」分组
         dsh-dapanyuntu；「板块热力」卡标题入口保留。Teleport 投射，本页激活时才挂载） -->
     <Teleport v-if="headerSlotActive" :to="PAGE_HEADER_ACTIONS_TARGET">
@@ -483,10 +481,6 @@ const isDistributionReady = computed(() => distribution.value.length > 0);
         <BaseButton variant="ghost" data-track="DASHBOARD_OPEN_FUTURES" @click="goFutures">
           <MenuIcon name="futures" :size="14" />
           期货
-        </BaseButton>
-        <BaseButton variant="ghost" data-track="DASHBOARD_OPEN_LEADERS" @click="goLeaders">
-          <MenuIcon name="trophy" :size="14" />
-          龙头
         </BaseButton>
         <BaseButton variant="ghost" data-track="DASHBOARD_OPEN_PANORAMA" @click="goPanorama">
           <MenuIcon name="globe" :size="14" />

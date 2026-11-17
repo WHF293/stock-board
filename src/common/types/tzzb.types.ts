@@ -235,6 +235,36 @@ export interface TzzbSyncMeta {
   authExpireLabel: string;
 }
 
+/**
+ * 账户口径数据快照（口径缓存持久化行；fetchTzzbScopeSnapshot 产出 + range 口径一并快照）
+ *
+ * 看板切换账户秒开回放与打开软件自动增量同步共用；数据字段为 null / 空数组
+ * 表示该模块无数据或拉取失败（回放层各自落空态）
+ */
+export interface TzzbScopeSnapshot {
+  syncMeta: TzzbSyncMeta | null;
+  pnl: TzzbPnlSummary | null;
+  position: TzzbPositionSummary | null;
+  assetChange: TzzbAssetChange | null;
+  dayCal: TzzbDayCalendar | null;
+  monthCal: TzzbMonthCalendar | null;
+  yearPoints: TzzbYearPoint[];
+  cleared: TzzbClearedPosition[];
+  fundReturns: TzzbHoldingReturn[];
+  fundCycles: TzzbFundCycle[];
+  stockTrades: TzzbStockTradePage | null;
+  allStockTrades: TzzbStockTrade[] | null;
+  fundTrades: TzzbFundTrade[];
+  /** 资产曲线区间（回放时一并恢复，保证指标行与曲线口径一致） */
+  range: string;
+  /** 自定义区间起（range = custom 时生效） */
+  customFrom: string;
+  /** 自定义区间止 */
+  customTo: string;
+  /** 快照时间（毫秒；自动增量同步按它与收盘节点比对判定过时） */
+  fetchedAt: number;
+}
+
 /** 指数代码 → 展示名（total_index 的 key，口径按指数通代码表） */
 export const TZZB_INDEX_NAME: Record<string, string> = {
   '1B0016': '上证50',
@@ -268,3 +298,6 @@ export const TZZB_RANGE_LABEL: Record<string, string> = Object.fromEntries(
 
 /** 摩擦账本全量流水分页上限（防御：异常 maxPage 时止损，按 20 条/页即 1000 笔） */
 export const TZZB_TRADE_FETCH_MAX_PAGES = 50;
+
+/** 持仓回放全量流水分页上限（20 条/页即 4000 笔；起始日为账本数据起始，跨度更长） */
+export const TZZB_HOLDING_TRADE_FETCH_MAX_PAGES = 200;

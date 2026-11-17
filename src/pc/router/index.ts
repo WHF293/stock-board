@@ -62,7 +62,7 @@ const routes = [
         component: PanoramaOverviewView,
         meta: { title: '全景' },
       },
-      // 龙头（原行业龙头页签）：市场总览页头按钮进入
+      // 龙头（原行业龙头页签）：入口已于 2026-11-17 移入「板块题材」页 tab，路由保留兼容旧链接
       {
         path: ROUTE_PATH.LEADERS,
         component: LeadersView,

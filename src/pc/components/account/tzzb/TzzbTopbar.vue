@@ -37,6 +37,8 @@ const emit = defineEmits<{
   selectAccounts: [];
   /** 强制更新账户列表（绕过缓存重拉上游） */
   refreshAccounts: [];
+  /** 自动增量同步（水位越过收盘节点则立即补拉，否则展示同步状态） */
+  autoSync: [];
 }>();
 
 /** 下拉开关 */
@@ -54,7 +56,7 @@ interface TzzbMenuItem {
   /** 菜单项说明 */
   desc: string;
   /** 实际操作（缺省 = 未开放占位） */
-  action?: 'sync' | 'reauth' | 'clearAuth' | 'selectAccounts' | 'refreshAccounts';
+  action?: 'sync' | 'reauth' | 'clearAuth' | 'selectAccounts' | 'refreshAccounts' | 'autoSync';
   /** 危险操作（标题用警示色） */
   danger?: boolean;
   /** 进行中标记（更新账户列表刷新中禁用 + 文案切换） */
@@ -64,7 +66,7 @@ interface TzzbMenuItem {
 /** 同步/授权菜单项 */
 const SETTINGS_ITEMS = computed<readonly TzzbMenuItem[]>(() => [
   { key: 'sync', label: '同步投资账本', desc: '拉取账户 / 持仓 / 流水全量数据', action: 'sync' },
-  { key: 'auto', label: '自动增量同步', desc: '每日收盘后按水位增量拉取' },
+  { key: 'auto', label: '自动增量同步', desc: '打开软件自动同步已选账户（收盘后自动补拉）', action: 'autoSync' },
   { key: 'select', label: '选择同步账户', desc: '勾选参与同步的账户（多选）', action: 'selectAccounts' },
   {
     key: 'refresh',
@@ -129,6 +131,7 @@ const onMenuPick = (item: TzzbMenuItem): void => {
   else if (item.action === 'clearAuth') emit('clearAuth');
   else if (item.action === 'selectAccounts') emit('selectAccounts');
   else if (item.action === 'refreshAccounts') emit('refreshAccounts');
+  else if (item.action === 'autoSync') emit('autoSync');
 };
 
 /**

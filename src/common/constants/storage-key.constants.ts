@@ -30,8 +30,11 @@ export const STORAGE_NS_HOT_NEWS_FILTER = 'hotNews.filter';
 /** 今天炒什么页 - 平台勾选状态命名空间（用户启用哪些热榜平台） */
 export const STORAGE_NS_HOT_BOARD_FILTER = 'hotBoard.filter';
 
-/** 今天炒什么页 - 视图模式命名空间（股票热榜 / ETF 热榜，'stock' | 'etf'） */
+/** 今天炒什么页 - 视图模式命名空间（股票热榜 / 热点新闻 / ETF 热榜 / 今天题材） */
 export const STORAGE_NS_HOT_BOARD_MODE = 'hotBoard.mode';
+
+/** 今天炒什么页 - 页签设置命名空间（tab 顺序 + 显隐，JSON：{ order: string[], hidden: string[] }） */
+export const STORAGE_NS_HOT_BOARD_TABS = 'hotBoard.tabs';
 
 /** 标的搜索历史命名空间（用户确认过的标的，最新在前，最多 SEARCH_HISTORY_MAX 条） */
 export const STORAGE_NS_STOCK_SEARCH = 'stockSearch';
@@ -50,6 +53,9 @@ export const STORAGE_NS_PLUGIN = 'plugin';
 
 /** 行情全景 · 行业龙头分组自定义排序（JSON：{ board: string[], segment: string[] }，存分组名顺序） */
 export const STORAGE_NS_PANORAMA_LEADERS_ORDER = 'panorama.leaders.order';
+
+/** 龙头卡片流布局模式（'horizontal' | 'vertical'，2026-11-17 王总指定按钮组切换，跨会话保留） */
+export const STORAGE_NS_LEADERS_LAYOUT = 'panorama.leaders.layout';
 
 /** 用户安装插件命名空间（应用内安装的插件代码持久化） */
 export const STORAGE_NS_USER_PLUGINS = 'plugin.user';
