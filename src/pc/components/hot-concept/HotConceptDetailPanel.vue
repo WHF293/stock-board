@@ -1,24 +1,25 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
-import { useRouter } from 'vue-router';
+import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import BaseButton from '../ui/BaseButton.vue';
 import BaseEmpty from '../ui/BaseEmpty.vue';
 import MenuIcon from '../ui/MenuIcon.vue';
 import {
   fetchHotConceptEventDetail,
   fetchHotConceptEventQuotes,
+  fetchHotConceptStockTags,
   fetchHotConceptThemeIncrease,
   fetchHotConceptThemeTable,
 } from '../../../common/api/hot-concept.api.ts';
 import { fetchConstituentQuotesBatch } from '../../../common/api/board-constituent-quote.api.ts';
 import type {
   HotConceptEventDetail,
+  HotConceptStockTagInfo,
   HotConceptThemeBoard,
 } from '../../../common/types/hot-concept.types.ts';
 import type { BoardConstituentQuote } from '../../../common/types/board-calendar.types.ts';
 import { POLLING_INTERVAL } from '../../../common/constants/polling.constants.ts';
-import { ROUTE_PATH } from '../../../common/constants/router-meta.constants.ts';
 import { usePolling } from '../../../common/composables/use-polling';
+import { useStockOpen } from '../../../common/composables/use-stock-open';
 import { getTrendByChangePercent } from '../../../common/constants/trend.constants.ts';
 import { TREND_TEXT_CLASS } from '../../../common/constants/stock-colors.constants.ts';
 import { formatPercent } from '../../../common/utils/format-percent';
@@ -33,6 +34,12 @@ import { formatPrice } from '../../../common/utils/format-price';
  * + 腾讯批量报价（个股最新价/流通市值，board-constituent-quote 通道）随行情
  * 轮询刷新（生效间隔 = max(设置页行情刷新档, 4s)，交易窗口感知）。
  *
+ * 交互对齐上游二级页（2026-11-17 实测上游页面）：
+ * - 影响板块 = 可点选页签，默认选中第一个板块，点选切换该板块的成分股列表；
+ * - 成分股行单击开右侧个股侧栏、双击进详情整页（左侧可选列表 = 卡片全部成分股）；
+ * - 个股下可展开描述块（标签 + 关联段落），get_stock_tag 体外不可用时回落
+ *   topStocks.reason 兜底（见 hot-concept.api.ts 的降级说明）。
+ *
  * 原 iframe 方案的三大问题（dataq 401 / 切换闪刷 / 二级页返回）随架构根除：
  * 无二级页、无跨域上下文销毁、行情列由自有通道补齐。
  */
@@ -42,7 +49,7 @@ const props = defineProps<{
   eventId: string;
 }>();
 
-const router = useRouter();
+const { openSidebar, openPage, toContextList } = useStockOpen();
 
 /* ---------------- 静态数据（详情 + 板块成分，事件不变不重拉） ---------------- */
 
@@ -58,6 +65,12 @@ const staticLoading = ref(false);
 /** 静态数据拉取失败 */
 const staticError = ref(false);
 
+/** 当前选中板块 id（null = 未选，随 boards 就绪默认第一个，对齐上游 index=0） */
+const activeThemeId = ref<string | null>(null);
+
+/** 个股标签与描述映射（code → tag info；get_stock_tag 不可用时为空映射） */
+const stockTagInfoMap = ref<Record<string, HotConceptStockTagInfo>>({});
+
 /**
  * 拉取详情与板块成分（eventId 变化时重拉；清单刷新同 id 不重拉）
  */
@@ -71,6 +84,7 @@ const fetchStatic = async (): Promise<void> => {
     ]);
     detail.value = eventDetail;
     boards.value = themeTable;
+    void fetchStockTagInfos(themeTable);
   } catch (error) {
     console.error('[hot-concept] 热点详情拉取失败', props.eventId, error);
     staticError.value = true;
@@ -81,7 +95,44 @@ const fetchStatic = async (): Promise<void> => {
 
 watch(() => props.eventId, () => void fetchStatic(), { immediate: true });
 
-/* ---------------- 成分股行模型（板块 → 细分概念分组摊平） ---------------- */
+// 板块清单就绪 / 变化时：选中项失效则回落第一个板块
+watch(
+  () => boards.value?.map((theme) => theme.id).join(','),
+  () => {
+    const ids = boards.value?.map((theme) => theme.id) ?? [];
+    if (ids.length === 0) {
+      activeThemeId.value = null;
+    } else if (activeThemeId.value === null || !ids.includes(activeThemeId.value)) {
+      activeThemeId.value = ids[0] ?? null;
+    }
+  },
+  { immediate: true },
+);
+
+/**
+ * 拉取个股标签与描述（fire-and-forget；失败静默，reason 兜底）
+ * @param table 影响板块树
+ */
+const fetchStockTagInfos = async (table: HotConceptThemeBoard[]): Promise<void> => {
+  const marketIdByCode = new Map<string, string>();
+  const codes: string[] = [];
+  const collect = (theme: HotConceptThemeBoard): void => {
+    for (const stock of theme.topStocks ?? []) {
+      if (stock.stockCode === '' || marketIdByCode.has(stock.stockCode)) continue;
+      marketIdByCode.set(stock.stockCode, stock.marketId);
+      codes.push(stock.stockCode);
+    }
+    for (const child of theme.children ?? []) collect(child);
+  };
+  for (const theme of table) collect(theme);
+  const keyword = table[0]?.showName ?? '';
+  const map = await fetchHotConceptStockTags(props.eventId, keyword, codes, marketIdByCode).catch(
+    () => new Map<string, HotConceptStockTagInfo>(),
+  );
+  stockTagInfoMap.value = Object.fromEntries(map);
+};
+
+/* ---------------- 成分股行模型（选中板块 → 细分概念分组摊平） ---------------- */
 
 /** 成分股行（上游 topStocks + 自有行情合并后的展示模型） */
 interface StockRow {
@@ -93,6 +144,8 @@ interface StockRow {
   upstreamRisePercent: number | null;
   /** 涨停状态（1 = 涨停） */
   limitUpState: number | null;
+  /** 上游上涨原因（多数为 null；描述块无标签数据时的兜底文案） */
+  reason: string | null;
 }
 
 /** 成分股分组（细分概念一组；无细分时整板块一组） */
@@ -102,12 +155,17 @@ interface StockGroup {
   rows: StockRow[];
 }
 
+/** 当前选中板块（失效时回落第一个） */
+const activeBoard = computed<HotConceptThemeBoard | null>(
+  () => boards.value?.find((theme) => theme.id === activeThemeId.value) ?? boards.value?.[0] ?? null,
+);
+
 /**
- * 板块树摊平为分组行（顺序保持上游口径：板块 → 细分 → 成分，领涨在前）
+ * 选中板块树摊平为分组行（顺序保持上游口径：细分 → 成分，领涨在前）
  */
 const stockGroups = computed<StockGroup[]>(() => {
-  const table = boards.value;
-  if (!table) return [];
+  const board = activeBoard.value;
+  if (!board) return [];
   const groups: StockGroup[] = [];
   const pushRows = (label: string, rows: HotConceptThemeBoard['topStocks']): void => {
     const list = (rows ?? []).filter((stock) => stock.stockCode !== '');
@@ -119,26 +177,47 @@ const stockGroups = computed<StockGroup[]>(() => {
           stockName: stock.stockName,
           upstreamRisePercent: stock.risePercent,
           limitUpState: stock.limitUpState,
+          reason: stock.reason,
         })),
       });
     }
   };
-  for (const theme of table) {
-    if (theme.children && theme.children.length > 0) {
-      for (const child of theme.children) {
-        pushRows(child.showName, child.topStocks);
-      }
-    } else {
-      pushRows(theme.showName, theme.topStocks);
+  if (board.children && board.children.length > 0) {
+    for (const child of board.children) {
+      pushRows(child.showName, child.topStocks);
     }
+  } else {
+    pushRows(board.showName, board.topStocks);
   }
   return groups;
 });
 
+/** 卡片全部成分股（跨板块去重，保持上游顺序；行情轮询入参 + 详情页上下文列表源） */
+const cardStockRows = computed<StockRow[]>(() => {
+  const rows: StockRow[] = [];
+  const seen = new Set<string>();
+  for (const theme of boards.value ?? []) {
+    const collect = (board: HotConceptThemeBoard): void => {
+      for (const stock of board.topStocks ?? []) {
+        if (stock.stockCode === '' || seen.has(stock.stockCode)) continue;
+        seen.add(stock.stockCode);
+        rows.push({
+          stockCode: stock.stockCode,
+          stockName: stock.stockName,
+          upstreamRisePercent: stock.risePercent,
+          limitUpState: stock.limitUpState,
+          reason: stock.reason,
+        });
+      }
+      for (const child of board.children ?? []) collect(child);
+    };
+    collect(theme);
+  }
+  return rows;
+});
+
 /** 全部成分股代码（去重，批量询价入参） */
-const stockSymbols = computed(() => [
-  ...new Set(stockGroups.value.flatMap((group) => group.rows.map((row) => row.stockCode))),
-]);
+const stockSymbols = computed(() => cardStockRows.value.map((row) => row.stockCode));
 
 /** 顶层题材列表（板块涨幅轮询入参） */
 const topThemes = computed(() =>
@@ -228,12 +307,108 @@ const rowPrice = (row: StockRow): number | null => stockQuoteMap.value[row.stock
 const rowMarketCap = (row: StockRow): number | null =>
   stockQuoteMap.value[row.stockCode]?.circulatingMarketCap ?? null;
 
+/* ---------------- 个股交互（单击侧栏 / 双击详情页，对齐全站口径） ---------------- */
+
+/** 单击延迟派发定时器（双击合并窗口；null = 无待派发单击） */
+let pendingClick: { timer: number; code: string } | null = null;
+
+/** 单击/双击合并窗口（毫秒；与 BaseTable enableDblclickNav 同值） */
+const DBLCLICK_MERGE_MS = 250;
+
 /**
- * 跳应用内个股详情
- * @param stockCode 6 位代码
+ * 卡片成分股的详情页上下文列表（左侧可选列表 = 当前卡片全部成分股）
  */
-const goStockDetail = (stockCode: string): void => {
-  void router.push(`${ROUTE_PATH.STOCK_DETAIL}/${stockCode}`);
+const cardContextList = computed(() =>
+  toContextList(cardStockRows.value, (row) => row.stockCode),
+);
+
+/**
+ * 成分股行单击（延迟合并双击窗口后打开右侧个股侧栏）
+ * @param row 成分股行
+ */
+const onStockRowClick = (row: StockRow): void => {
+  if (pendingClick) window.clearTimeout(pendingClick.timer);
+  const timer = window.setTimeout(() => {
+    pendingClick = null;
+    openSidebar(row.stockCode);
+  }, DBLCLICK_MERGE_MS);
+  pendingClick = { timer, code: row.stockCode };
+};
+
+/**
+ * 成分股行双击（取消未派发的单击，跳详情整页并携带卡片上下文列表）
+ * @param row 成分股行
+ */
+const onStockRowDblclick = (row: StockRow): void => {
+  if (pendingClick) {
+    window.clearTimeout(pendingClick.timer);
+    pendingClick = null;
+  }
+  openPage(row.stockCode, cardContextList.value);
+};
+
+// 组件卸载时清掉待派发的单击定时器
+onBeforeUnmount(() => {
+  if (pendingClick) window.clearTimeout(pendingClick.timer);
+  pendingClick = null;
+});
+
+/* ---------------- 个股描述块（标签 + 关联段落；默认一行，可展开） ---------------- */
+
+/** 已展开描述的股票代码集合 */
+const expandedDescCodes = ref<Set<string>>(new Set());
+
+/**
+ * 互动易问答原文解析（associatedReason 为 JSON 串 {query, answer} 时转可读文案）
+ * @param reason 关联描述原文
+ * @returns 可读文案（非 JSON 原样返回）
+ */
+const parseAssociateReason = (reason: string): string => {
+  if (!reason.startsWith('{')) return reason;
+  try {
+    const qa = JSON.parse(reason) as { query?: string; answer?: string };
+    return `投资者提问：${qa.query ?? ''} 董秘回答：${qa.answer ?? ''}`;
+  } catch {
+    return reason;
+  }
+};
+
+/**
+ * 个股描述内容（标签数据优先，回落上游上涨原因）
+ * @param row 成分股行
+ * @returns 标签清单 + 段落清单；无可展示内容为 null
+ */
+const descOf = (row: StockRow): { tags: string[]; paragraphs: string[] } | null => {
+  const info = stockTagInfoMap.value[row.stockCode];
+  if (info) {
+    const tags = info.tagInfoList.map((tag) => tag.name).filter((name) => name !== '');
+    const paragraphs = info.associatedInfoList
+      .filter((item) => (item.associatedReason ?? '') !== '')
+      .map((item) => {
+        const text = parseAssociateReason(item.associatedReason ?? '');
+        const source = item.associatedSource ?? '';
+        return source === '' ? text : `【${source}】${text}`;
+      });
+    if (tags.length > 0 || paragraphs.length > 0) return { tags, paragraphs };
+  }
+  if (row.reason !== null && row.reason !== '') {
+    return { tags: [], paragraphs: [row.reason] };
+  }
+  return null;
+};
+
+/**
+ * 切换个股描述展开态
+ * @param stockCode 6 位股票代码
+ */
+const toggleDesc = (stockCode: string): void => {
+  const next = new Set(expandedDescCodes.value);
+  if (next.has(stockCode)) {
+    next.delete(stockCode);
+  } else {
+    next.add(stockCode);
+  }
+  expandedDescCodes.value = next;
 };
 </script>
 
@@ -297,27 +472,32 @@ const goStockDetail = (stockCode: string): void => {
         </a>
       </section>
 
-      <!-- 影响板块：板块名 + 实时涨幅（轮询刷新） -->
+      <!-- 影响板块：可点选页签（默认第一个板块，点选切换成分股列表）+ 实时涨幅 -->
       <section v-if="(boards?.length ?? 0) > 0" class="border-b border-flat-weak px-4 py-3">
         <h3 class="text-xs font-semibold text-text-secondary">影响板块</h3>
         <div class="mt-1.5 flex flex-wrap gap-1.5">
-          <span
+          <button
             v-for="theme in boards ?? []"
             :key="theme.id"
-            class="flex items-center gap-1 rounded bg-flat-weak px-1.5 py-0.5 text-xs"
+            type="button"
+            class="pressable flex items-center gap-1 rounded px-1.5 py-0.5 text-xs"
+            :class="theme.id === activeThemeId ? 'bg-primary-weak text-primary' : 'bg-flat-weak text-text-secondary'"
+            :title="`查看「${theme.showName}」板块成分股`"
+            @click="activeThemeId = theme.id"
           >
-            <span class="text-text-secondary">{{ theme.showName }}</span>
+            <span>{{ theme.showName }}</span>
             <span
               class="tabular-nums"
               :class="themeRiseOf(theme.id) === null ? 'text-text-tertiary' : TREND_TEXT_CLASS[getTrendByChangePercent(themeRiseOf(theme.id) as number)]"
             >
               {{ themeRiseOf(theme.id) === null ? '—' : formatPercent(themeRiseOf(theme.id)) }}
             </span>
-          </span>
+          </button>
         </div>
       </section>
 
-      <!-- 成分股表格：名称代码 / 最新 / 涨幅 / 流通市值（行情三列走自有通道，涨停标红） -->
+      <!-- 成分股表格：名称代码 / 最新 / 涨幅 / 流通市值（行情三列走自有通道，涨停标红）；
+           单击开侧栏 / 双击进详情页（左侧列表 = 卡片全部成分股）；行下可展开个股描述 -->
       <section v-if="stockGroups.length > 0" class="pb-2">
         <table class="w-full text-xs tabular-nums">
           <thead>
@@ -332,29 +512,61 @@ const goStockDetail = (stockCode: string): void => {
             <tr>
               <td colspan="4" class="px-4 pb-1 pt-2 text-xs text-text-tertiary">{{ group.label }}</td>
             </tr>
-            <tr
-              v-for="row in group.rows"
-              :key="row.stockCode"
-              class="cursor-pointer hover:bg-flat-weak"
-              :title="`查看 ${row.stockName} 行情`"
-              @click="goStockDetail(row.stockCode)"
-            >
-              <td class="max-w-0 px-4 py-1.5">
-                <span class="block truncate font-medium text-text">{{ row.stockName }}</span>
-                <span class="block text-text-tertiary">{{ row.stockCode }}</span>
-              </td>
-              <td class="px-2 py-1.5 text-right text-text">{{ formatPrice(rowPrice(row)) }}</td>
-              <td
-                class="px-2 py-1.5 text-right"
-                :class="rowRisePercent(row) === null ? 'text-text-tertiary' : TREND_TEXT_CLASS[getTrendByChangePercent(rowRisePercent(row) as number)]"
+            <template v-for="row in group.rows" :key="row.stockCode">
+              <tr
+                class="cursor-pointer hover:bg-flat-weak"
+                :title="`单击查看 ${row.stockName} 行情，双击进详情页`"
+                @click="onStockRowClick(row)"
+                @dblclick="onStockRowDblclick(row)"
               >
-                <span>{{ rowRisePercent(row) === null ? '—' : formatPercent(rowRisePercent(row)) }}</span>
-                <span v-if="row.limitUpState === 1" class="ml-0.5 rounded bg-up-weak px-0.5 text-[10px] text-up">停</span>
-              </td>
-              <td class="px-4 py-1.5 text-right text-text-tertiary">
-                {{ rowMarketCap(row) === null ? '—' : rowMarketCap(row)?.toFixed(2) }}
-              </td>
-            </tr>
+                <td class="max-w-0 px-4 py-1.5">
+                  <span class="block truncate font-medium text-text">{{ row.stockName }}</span>
+                  <span class="block text-text-tertiary">{{ row.stockCode }}</span>
+                </td>
+                <td class="px-2 py-1.5 text-right text-text">{{ formatPrice(rowPrice(row)) }}</td>
+                <td
+                  class="px-2 py-1.5 text-right"
+                  :class="rowRisePercent(row) === null ? 'text-text-tertiary' : TREND_TEXT_CLASS[getTrendByChangePercent(rowRisePercent(row) as number)]"
+                >
+                  <span>{{ rowRisePercent(row) === null ? '—' : formatPercent(rowRisePercent(row)) }}</span>
+                  <span v-if="row.limitUpState === 1" class="ml-0.5 rounded bg-up-weak px-0.5 text-[10px] text-up">停</span>
+                </td>
+                <td class="px-4 py-1.5 text-right text-text-tertiary">
+                  {{ rowMarketCap(row) === null ? '—' : rowMarketCap(row)?.toFixed(2) }}
+                </td>
+              </tr>
+              <!-- 个股描述块：默认一行，查看更多展开 / 收起（无数据不渲染） -->
+              <tr v-if="descOf(row) !== null">
+                <td colspan="4" class="border-b border-flat-weak px-4 pb-2 pt-0.5">
+                  <div :class="expandedDescCodes.has(row.stockCode) ? '' : 'line-clamp-1'">
+                    <div v-if="(descOf(row)?.tags.length ?? 0) > 0" class="mb-1 flex flex-wrap gap-1">
+                      <span
+                        v-for="tag in descOf(row)?.tags"
+                        :key="tag"
+                        class="rounded bg-flat-weak px-1.5 py-0.5 text-[10px] text-text-secondary"
+                      >
+                        {{ tag }}
+                      </span>
+                    </div>
+                    <p
+                      v-for="(text, index) in descOf(row)?.paragraphs"
+                      :key="index"
+                      class="text-xs leading-relaxed text-text-tertiary"
+                    >
+                      {{ text }}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    class="pressable mt-0.5 inline-flex items-center text-xs text-primary hover:underline"
+                    @click.stop="toggleDesc(row.stockCode)"
+                  >
+                    {{ expandedDescCodes.has(row.stockCode) ? '收起' : '查看更多' }}
+                    <MenuIcon v-if="!expandedDescCodes.has(row.stockCode)" name="chevronRight" :size="12" />
+                  </button>
+                </td>
+              </tr>
+            </template>
           </tbody>
         </table>
       </section>

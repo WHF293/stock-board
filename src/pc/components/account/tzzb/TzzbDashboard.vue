@@ -439,16 +439,39 @@ const holdingReplay = computed(() =>
   holdingTrades.value === null ? null : replayTzzbHoldings(holdingTrades.value),
 );
 
-/** 持仓与当日盈亏推算汇总（流水 / 行情任一更新即重算；回放结果复用上方缓存） */
+/** 持仓与当日盈亏推算汇总（流水 / 行情任一更新即重算；回放结果复用上方缓存）
+ *
+ * 权威锚定：清算快照（queryStockPosition.holdings）已覆盖流水的标的重置为
+ * 券商数量，快照判已清仓且当日无成交的幽灵持仓剔除（流水缺口残留，2026-11-17）；
+ * 快照未拉到（position 为 null）或截止日早于标的最新成交日时回落纯回放 */
 const holdingSummary = computed(() => {
   if (holdingTrades.value === null || holdingReplay.value === null) return null;
+  const positionSnapshot = position.value;
+  // 兼容旧口径缓存快照（holdings 字段缺席 = 锚定不可用，回落纯回放）
+  const anchor =
+    positionSnapshot && Array.isArray(positionSnapshot.holdings) && syncMeta.value?.dataDate
+      ? {
+          holdings: new Map(positionSnapshot.holdings.map((h) => [h.code, h])),
+          dataDate: syncMeta.value.dataDate,
+        }
+      : undefined;
   return buildTzzbHoldingSummary(
     holdingTrades.value,
     holdingQuotes.value,
     dayjs().format('YYYY-MM-DD'),
     holdingReplay.value,
+    anchor,
   );
 });
+
+/** 当日盈亏实时推算是否可用（流水就绪且至少拿到一笔行情；否则顶部指标回落清算口径） */
+const holdingLiveReady = computed(
+  () =>
+    holdingSummary.value !== null &&
+    holdingSummary.value.symbols.length > 0 &&
+    Object.keys(holdingQuotes.value).length > 0 &&
+    focusKind.value !== 'fund',
+);
 
 /**
  * 拉取当前持仓 ∪ 当日成交标的的实时行情（轮询任务；无持仓静默跳过）
@@ -495,6 +518,9 @@ const lastPoint = computed(() => {
   const trend = pnl.value?.assetTrend ?? [];
   return trend.length > 0 ? trend[trend.length - 1] : null;
 });
+
+/** 当日日期（YYYYMMDD；当日盈亏实时推算口径的归属日标签） */
+const todayYmd = computed(() => dayjs().format('YYYYMMDD'));
 
 /* ---------------- 账户口径本地缓存（切换账户秒开，2026-11-10 王总指定） ----------------
  * 快照内存 + localStorage 持久化收敛在 tzzb-scope-cache store（打开软件的自动增量
@@ -1325,15 +1351,16 @@ const openStockDetailPage = (code: string): void => {
     </template>
 
     <template v-else>
-      <!-- ① 指标行（区间盈亏 / 对比沪深300 跟随资产曲线区间） -->
+      <!-- ① 指标行（当日盈亏优先实时推算，未就绪回落清算口径；区间盈亏 / 对比沪深300 跟随资产曲线区间） -->
       <TzzbMetricRow
         :total-asset="position?.totalAsset ?? 0"
         :market-value="position?.marketValue ?? 0"
         :available-funds="position?.availableFunds ?? 0"
         :position-ratio="position?.positionRatio ?? 0"
-        :daily-profit="lastPoint?.dailyProfit ?? 0"
-        :daily-rate="lastPoint?.dailyRate ?? null"
-        :daily-date="lastPoint?.date ?? ''"
+        :daily-profit="holdingLiveReady ? (holdingSummary?.dayPnl ?? 0) : (lastPoint?.dailyProfit ?? 0)"
+        :daily-rate="holdingLiveReady ? (holdingSummary?.dayRate ?? null) : (lastPoint?.dailyRate ?? null)"
+        :daily-source="holdingLiveReady ? 'live' : 'cleared'"
+        :daily-date="holdingLiveReady ? todayYmd : (lastPoint?.date ?? '')"
         :range-profit="pnl?.totalProfit ?? 0"
         :range-rate="pnl?.totalRate ?? 0"
         :range-label="rangeLabel === '自定义区间' ? `${customFrom} ~ ${customTo}` : rangeLabel"

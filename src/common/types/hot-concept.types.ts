@@ -130,3 +130,40 @@ export interface HotConceptThemeIncrease {
   /** 涨停家数（可为 null） */
   limitUpCount: number | null;
 }
+
+/* ---------------- 个股标签与描述（recommend 系接口） ---------------- */
+
+/**
+ * 个股标签（get_stock_tag.tagInfoList 项；字段名按上游 bundle 逆向，缺失容错）
+ *
+ * 数据源：/app/concept_v2_api/open/api/concept/event/recommend/v1/get_stock_tag（POST）。
+ * ⚠️ 2026-11-17 实测：该接口仅在上游关键词概念视图下由页面自身触发，体外合成调用
+ * （含带 cookie 的页面内 fetch）一律 500 系统异常，属上游会话/上下文绑定；
+ * 本应用调用失败时静默降级为无描述（topStocks.reason 兜底），上游恢复后自动点亮
+ */
+export interface HotConceptStockTag {
+  /** 标签 id */
+  tagId: string;
+  /** 标签名（tagName / name 容错取值） */
+  name: string;
+}
+
+/** 个股关联信息（描述段落；来源为公告 / 互动易问答等） */
+export interface HotConceptStockAssociate {
+  /** 来源（如 互动易 / 公告；可为 null） */
+  associatedSource: string | null;
+  /** 描述原文（互动易时为 JSON 串 {query, answer}） */
+  associatedReason: string | null;
+  /** 回答时间（互动易；可为 null） */
+  answerTime: string | null;
+}
+
+/** 个股标签与描述（get_stock_tag 返回项，按 stockCode 对齐） */
+export interface HotConceptStockTagInfo {
+  /** 6 位股票代码 */
+  stockCode: string;
+  /** 标签列表（可为空数组） */
+  tagInfoList: HotConceptStockTag[];
+  /** 关联描述段落列表（可为空数组） */
+  associatedInfoList: HotConceptStockAssociate[];
+}
