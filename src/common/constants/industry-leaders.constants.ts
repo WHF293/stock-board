@@ -23,6 +23,23 @@ export const LEADER_KIND_OPTIONS: readonly { label: string; value: LeaderKind }[
   { label: '细分赛道', value: LEADER_KIND.SEGMENT },
 ];
 
+/** 龙头卡片流布局模式（2026-11-17 王总指定：新增按钮组切换横向 / 竖向滑动） */
+export const LEADER_LAYOUT = {
+  /** 横向滑动：卡片流左右滑动（原形态，行数按容器高度自适应） */
+  HORIZONTAL: 'horizontal',
+  /** 竖向滑动：卡片流上下滑动（多列纵向排列） */
+  VERTICAL: 'vertical',
+} as const satisfies Record<string, string>;
+
+/** 龙头卡片流布局模式类型 */
+export type LeaderLayout = (typeof LEADER_LAYOUT)[keyof typeof LEADER_LAYOUT];
+
+/** 布局模式切换选项（BaseTabs 按钮组） */
+export const LEADER_LAYOUT_OPTIONS: readonly { label: string; value: LeaderLayout }[] = [
+  { label: '横向滑动', value: LEADER_LAYOUT.HORIZONTAL },
+  { label: '竖向滑动', value: LEADER_LAYOUT.VERTICAL },
+];
+
 /** 龙头标的条目 */
 export interface LeaderStock {
   /** 完整符号（sh600519 / sz300274 / bj872808 / hk01801） */

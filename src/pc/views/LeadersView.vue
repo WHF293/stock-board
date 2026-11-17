@@ -8,7 +8,9 @@ import { PAGE_HEADER_ACTIONS_TARGET, usePageHeaderSlot } from '../../common/comp
 /**
  * 龙头（原「行情全景」页行业龙头页签独立成页，2026-11-06 王总指定拆分）：
  * 板块 / 细分赛道静态清单卡片流，数据 / 轮询 / 拖拽排序均由 PanoramaLeadersBoard 自管；
- * 页面入口在市场总览页头「龙头」按钮
+ * 页面入口原在市场总览页头「龙头」按钮，2026-11-17 起移入「板块题材」页 tab
+ * （板块龙头 / 题材龙头，经 PanoramaLeadersBoard fixedKind 外控）——
+ * 本页路由保留兼容旧链接，侧栏与页头均无入口
  */
 
 /** 龙头面板实例（调用其暴露的 refresh / loading，页头刷新按钮用） */

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { VueDraggable } from 'vue-draggable-plus';
 import BaseCard from '../ui/BaseCard.vue';
@@ -10,9 +10,12 @@ import BaseTabs from '../ui/BaseTabs.vue';
 import {
   LEADER_KIND,
   LEADER_KIND_OPTIONS,
+  LEADER_LAYOUT,
+  LEADER_LAYOUT_OPTIONS,
   getLeaderGroups,
   type LeaderGroup,
   type LeaderKind,
+  type LeaderLayout,
 } from '../../../common/constants/industry-leaders.constants.ts';
 import { fetchLeaderQuotes, type LeaderQuote } from '../../../common/api/industry-leaders.api.ts';
 import { usePolling } from '../../../common/composables/use-polling';
@@ -23,7 +26,10 @@ import { TREND_PILL_CLASS, TREND_TEXT_CLASS } from '../../../common/constants/st
 import { formatPercent } from '../../../common/utils/format-percent';
 import { formatPrice } from '../../../common/utils/format-price';
 import { appStorage } from '../../../common/utils/app-local-storage';
-import { STORAGE_NS_PANORAMA_LEADERS_ORDER } from '../../../common/constants/storage-key.constants.ts';
+import {
+  STORAGE_NS_LEADERS_LAYOUT,
+  STORAGE_NS_PANORAMA_LEADERS_ORDER,
+} from '../../../common/constants/storage-key.constants.ts';
 import { ROUTE_PATH } from '../../../common/constants/router-meta.constants.ts';
 
 /**
@@ -32,12 +38,22 @@ import { ROUTE_PATH } from '../../../common/constants/router-meta.constants.ts';
  * 内容出自 .ai/项目资源/板块龙头.md），分组与成员不可增删，但分组顺序支持拖拽自定义
  * （2026-10-29 追加：把感兴趣的板块 / 赛道拖到前面；按维度分别持久化，跨会话保留）。
  *
- * 布局对齐自选股平铺看板：一个分组一张竖向卡片，卡片流「按容器高度自适应 2~5 行布满、
- * 左右横向滑动」（ResizeObserver 测高 → 行数 = clamp(高度 ÷ 卡片高, 2, 5)）。
+ * 2026-11-17 王总指定变更：
+ * - 支持外部维度控制（fixedKind）：龙头入口从市场总览页头移入「板块题材」页 tab
+ *   （板块龙头 / 题材龙头两个 tab），外部传 fixedKind 时隐藏内部维度 BaseTabs；
+ * - 新增布局按钮组（横向滑动 / 竖向滑动）：横向 = 原形态左右滑动（行数按容器高度
+ *   自适应 2~5 行）；竖向 = 多列纵向排列上下滑动（列数按容器宽度自适应），选择持久化。
+ *
  * 交互：单击卡片行开右侧个股详情侧栏，双击进个股详情整页（单击延迟派发合并双击，
  * 与 BaseTable enableDblclickNav 同款窗口）；点卡片标题进「行业龙头详情」整页
  * （该板块 / 赛道全部龙头的分时 / 日K 网格，排版参考宽基ETF页）；报价随行情轮询刷新。
  */
+
+/** 外部维度控制：传入时维度由外部 tab 决定（隐藏内部维度 BaseTabs）；不传 = 页内自管（龙头独立页） */
+const props = defineProps<{
+  /** 固定维度（外部 tab 控制时传入） */
+  fixedKind?: LeaderKind;
+}>();
 
 const { openSidebar, openPage } = useStockOpen();
 const router = useRouter();
@@ -53,8 +69,34 @@ const openLeaderDetail = (group: LeaderGroup): void => {
   });
 };
 
-/** 当前维度（板块 / 细分赛道；会话内状态） */
-const kind = ref<LeaderKind>(LEADER_KIND.BOARD);
+/** 当前维度（板块 / 细分赛道；外部 fixedKind 传入时跟随外部，否则页内自管） */
+const kind = ref<LeaderKind>(props.fixedKind ?? LEADER_KIND.BOARD);
+
+// ---------- 布局模式（横向 / 竖向滑动；appStorage 持久化，2026-11-17 王总指定） ----------
+
+/**
+ * 读取持久化的布局模式（坏值回落横向 = 原形态）
+ * @returns 布局模式
+ */
+const readLayoutStorage = (): LeaderLayout =>
+  appStorage.getItem(STORAGE_NS_LEADERS_LAYOUT) === LEADER_LAYOUT.VERTICAL
+    ? LEADER_LAYOUT.VERTICAL
+    : LEADER_LAYOUT.HORIZONTAL;
+
+/** 布局模式（横向 = 左右滑动 / 竖向 = 上下滑动） */
+const layout = ref<LeaderLayout>(readLayoutStorage());
+
+/** 是否竖向布局（模板分支判断用） */
+const isVertical = computed(() => layout.value === LEADER_LAYOUT.VERTICAL);
+
+/**
+ * 切换布局模式（按钮组入口）：落盘持久化
+ * @param next 新布局模式
+ */
+const setLayout = (next: LeaderLayout): void => {
+  layout.value = next;
+  appStorage.setItem(STORAGE_NS_LEADERS_LAYOUT, next);
+};
 
 // ---------- 分组自定义排序（拖拽卡片；按维度持久化到 appStorage） ----------
 
@@ -146,6 +188,16 @@ usePolling({
   tradingAware: true,
 });
 
+// 外部 tab 切换维度（fixedKind）：跟随 + 立即重拉报价（不等下一拍轮询）
+watch(
+  () => props.fixedKind,
+  (next) => {
+    if (!next || next === kind.value) return;
+    kind.value = next;
+    void fetchQuotes();
+  },
+);
+
 // 挂载即拉一次
 void fetchQuotes();
 
@@ -169,8 +221,17 @@ const rowCount = ref(2);
 const ROW_COUNT_MIN = 2;
 const ROW_COUNT_MAX = 5;
 
-/** 单张卡片的目标高度（像素；含卡头与 5 行标的的舒适高度） */
+/** 单张卡片的目标高度（像素；含卡头与 5 行标的的舒适高度；与横向模式 auto-cols-[264px] 同值） */
 const CARD_TARGET_HEIGHT_PX = 264;
+
+/** 竖向模式卡片列最小宽度（像素；与横向模式卡片列宽同值，列数由容器宽度自适应） */
+const CARD_COLUMN_MIN_WIDTH_PX = CARD_TARGET_HEIGHT_PX;
+
+/** 竖向模式模板列样式（auto-fill：容器能放几列放几列，窄容器自动收到 1 列） */
+const verticalGridStyle = {
+  gridTemplateColumns: `repeat(auto-fill, minmax(${CARD_COLUMN_MIN_WIDTH_PX}px, 1fr))`,
+  gridAutoRows: `${CARD_TARGET_HEIGHT_PX}px`,
+} as const;
 
 /** 容器内边距留量（像素；上下 gap 与滚动条余量） */
 const BOARD_HEIGHT_PADDING_PX = 24;
@@ -241,9 +302,15 @@ const onRowDblclick = (symbol: string): void => {
 
 <template>
   <div class="flex min-h-0 flex-1 flex-col gap-2">
-    <!-- 维度切换：板块 / 细分赛道 -->
+    <!-- 控制行：维度切换（外部 fixedKind 接管时隐藏，由「板块题材」页 tab 决定）+
+         布局按钮组（横向 / 竖向滑动，2026-11-17 王总指定） -->
     <div class="flex shrink-0 items-center gap-2">
-      <BaseTabs v-model="kind" :options="LEADER_KIND_OPTIONS" />
+      <BaseTabs v-if="!fixedKind" v-model="kind" :options="LEADER_KIND_OPTIONS" />
+      <BaseTabs
+        :model-value="layout"
+        :options="LEADER_LAYOUT_OPTIONS"
+        @update:model-value="setLayout($event as LeaderLayout)"
+      />
       <span class="text-xs text-text-tertiary">
         单击开侧栏 · 双击进详情页 · 点卡片标题看龙头K线 · 拖拽卡片把感兴趣的板块 / 赛道移到前面（自动记住）
       </span>
@@ -259,11 +326,17 @@ const onRowDblclick = (symbol: string): void => {
       <BaseEmpty text="龙头报价加载失败，请稍后重试" />
     </BaseCard>
 
-    <!-- 卡片流：按容器高度自适应 2~5 行布满、左右横向滑动（grid-flow-col 纵向先填满一列再横向）；
-           拖拽卡片 = 调整分组顺序（Sortable 指针事件模拟，Tauri 下可用，见 WatchlistTiledBoard 同款） -->
+    <!-- 卡片流：横向 = 按容器高度自适应 2~5 行布满、左右滑动（grid-flow-col 纵向先填满一列再横向）；
+         竖向 = 按容器宽度自适应列数、上下滑动（grid-flow-row，卡片高度固定）；
+         拖拽卡片 = 调整分组顺序（Sortable 指针事件模拟，Tauri 下可用，见 WatchlistTiledBoard 同款） -->
     <div
       ref="boardRef"
-      class="min-h-0 flex-1 overflow-x-auto overflow-y-hidden pb-1"
+      class="min-h-0 flex-1 pb-1"
+      :class="
+        isVertical
+          ? 'overflow-x-hidden overflow-y-auto'
+          : 'overflow-x-auto overflow-y-hidden'
+      "
     >
       <VueDraggable
         tag="div"
@@ -271,8 +344,13 @@ const onRowDblclick = (symbol: string): void => {
         :animation="150"
         ghost-class="opacity-40"
         :force-fallback="true"
-        class="grid h-full auto-cols-[264px] grid-flow-col gap-3"
-        :style="{ gridTemplateRows: `repeat(${rowCount}, minmax(0, 1fr))` }"
+        class="grid gap-3"
+        :class="isVertical ? '' : 'h-full auto-cols-[264px] grid-flow-col'"
+        :style="
+          isVertical
+            ? verticalGridStyle
+            : { gridTemplateRows: `repeat(${rowCount}, minmax(0, 1fr))` }
+        "
         @update:model-value="onGroupsReorder"
       >
         <BaseCard

@@ -20,8 +20,8 @@ export const HOME_FEATURES: readonly HomeFeature[] = [
   },
   {
     icon: '▤',
-    title: '板块分析',
-    desc: 'bump 图追板块名次连线、涨跌停矩阵点击展开成分股扩展行、赚钱效应气泡图在可拖宽侧边栏，主线与退潮一眼可辨。',
+    title: '板块题材',
+    desc: 'bump 图追板块名次连线、涨跌停矩阵点击展开成分股扩展行、赚钱效应气泡图在可拖宽侧边栏，板块 / 题材龙头卡片流，主线与退潮一眼可辨。',
     chapterId: 'board-calendar',
   },
   {
