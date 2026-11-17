@@ -287,6 +287,8 @@ export interface BoardConstituentQuote {
   turnoverRate: number | null;
   /** 成交额（元） */
   amount: number | null;
+  /** 流通市值（亿元；2026-11-17 今天题材成分股表格新增列） */
+  circulatingMarketCap: number | null;
 }
 
 /* ---------------------------------- 视图模型 ---------------------------------- */

@@ -68,8 +68,9 @@ const toNumberOrNull = (value: unknown): number | null => {
 /**
  * 腾讯行情行解析：`v_sh600519="1~贵州茅台~600519~..."` → 行情
  *
- * 字段序（~ 分隔）：1 名称 / 3 现价 / 32 涨跌幅% / 37 成交额（万元） / 38 换手率%；
- * 停牌股现价为 0 → 按无行情处理（price 置 null，扩展行显示 `--`）。
+ * 字段序（~ 分隔）：1 名称 / 3 现价 / 32 涨跌幅% / 37 成交额（万元） / 38 换手率%
+ * / 44 流通市值（亿元）；停牌股现价为 0 → 按无行情处理（price 置 null，
+ * 扩展行显示 `--`）。
  * @param symbol 6 位股票代码
  * @param fields 分隔后的字段数组
  * @returns 行情（字段缺失按 null）
@@ -84,6 +85,7 @@ const parseTencentQuote = (symbol: string, fields: string[]): BoardConstituentQu
     changePercent: toNumberOrNull(fields[32]),
     turnoverRate: toNumberOrNull(fields[38]),
     amount: amountWan === null ? null : amountWan * 10_000,
+    circulatingMarketCap: toNumberOrNull(fields[44]),
   };
 };
 
@@ -128,7 +130,7 @@ const fetchUlistQuoteBatch = async (
   const params = new URLSearchParams({
     fltt: '2',
     invt: '2',
-    fields: 'f12,f14,f2,f3,f8,f6',
+    fields: 'f12,f14,f2,f3,f8,f6,f21',
     secids,
   });
   const response = await push2Fetch(
@@ -155,6 +157,8 @@ const fetchUlistQuoteBatch = async (
       changePercent: toNumberOrNull(row.f3),
       turnoverRate: toNumberOrNull(row.f8),
       amount: toNumberOrNull(row.f6),
+      // f21 流通市值（元）→ 亿元口径与腾讯通道一致
+      circulatingMarketCap: toNumberOrNull(row.f21) === null ? null : (toNumberOrNull(row.f21) as number) / 1e8,
     });
   }
   if (result.size === 0) {
@@ -265,6 +269,7 @@ export const fetchConstituentQuotesByList = async (
         changePercent: quote?.changePercent ?? null,
         turnoverRate: quote?.turnoverRate ?? null,
         amount: quote?.amount ?? null,
+        circulatingMarketCap: quote?.circulatingMarketCap ?? null,
       } satisfies BoardConstituentQuote;
     })
     .sort((a, b) => (b.changePercent ?? Number.NEGATIVE_INFINITY) - (a.changePercent ?? Number.NEGATIVE_INFINITY));
