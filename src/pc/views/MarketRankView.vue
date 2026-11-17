@@ -226,7 +226,8 @@ const onRankAiAnalysis = (): void => {
 <template>
   <div class="flex h-full min-h-0 flex-col gap-4">
     <!-- 页头快捷入口（大A个股 / 港股个股，2026-11-06 行情全景拆分）+ 榜单工具条上移页头：
-         页签设置 + AI 分析（Teleport 投射，本页激活时才挂载） -->
+         页签设置 + AI 分析（Teleport 投射，本页激活时才挂载）；
+         页签设置排在末尾（2026-11-17 王总指定：紧贴「插件设置」左侧） -->
     <Teleport v-if="headerSlotActive" :to="PAGE_HEADER_ACTIONS_TARGET">
       <div class="flex items-center gap-2">
         <BaseButton variant="ghost" data-track="MARKET_RANK_OPEN_A_STOCK" @click="goAStock">
@@ -237,13 +238,13 @@ const onRankAiAnalysis = (): void => {
           <MenuIcon name="chartBars" :size="14" />
           港股个股
         </BaseButton>
-        <BaseButton variant="ghost" data-track="MARKET_RANK_TAB_SETTINGS" @click="tabSettingsOpen = true">
-          <MenuIcon name="settings" :size="14" />
-          页签设置
-        </BaseButton>
         <BaseButton v-if="agentEntryVisible" variant="ghost" @click="onRankAiAnalysis">
           <MenuIcon name="agent" :size="14" />
           AI 分析
+        </BaseButton>
+        <BaseButton variant="ghost" data-track="MARKET_RANK_TAB_SETTINGS" @click="tabSettingsOpen = true">
+          <MenuIcon name="settings" :size="14" />
+          页签设置
         </BaseButton>
       </div>
     </Teleport>

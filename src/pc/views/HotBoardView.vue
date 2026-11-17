@@ -577,16 +577,14 @@ const runBoardAnalysis = async (scope: BoardSource): Promise<void> => {
          高度 h-full 填满 MainLayout 内容容器（定高，2026-10-24 起双滚动条治理），
          tab 行 shrink-0，四种模式的内容区各撑满剩余高度 -->
   <div class="flex h-full min-h-0 flex-col gap-4">
-    <!-- 页级动作上移 MainLayout 页头：页签设置（四模式通用，盘面雷达同款）
+    <!-- 页级动作上移 MainLayout 页头（2026-11-17 王总指定：页签设置紧贴「插件设置」左侧，
+         故排在平台设置 / 新闻源设置之后；order-10 兜底 ETF 模式——本容器需排在
+         EtfHotBoard 投射的 ETF 专属动作之后，跨 Teleport 用 order 控制）
          + 股票热榜专属（启用计数 / 平台设置）+ 热点新闻专属（新闻源设置，
          2026-11-17 随页面自侧栏并入，经 expose 接口操作）；ETF 模式的页头动作
          由 EtfHotBoard 自行投射；今天题材模式的刷新在 HotConceptBoard 控制行内 -->
     <Teleport v-if="headerSlotActive" :to="PAGE_HEADER_ACTIONS_TARGET">
-      <div class="flex items-center gap-3">
-        <BaseButton variant="ghost" data-track="HOT_BOARD_TAB_SETTINGS" @click="tabSettingsOpen = true">
-          <MenuIcon name="settings" :size="14" />
-          页签设置
-        </BaseButton>
+      <div class="order-10 flex items-center gap-3">
         <template v-if="mode === 'stock'">
           <span class="text-xs text-text-tertiary">
             已启用 {{ visibleSources.length }} / {{ sourceItems.length }} 个平台
@@ -607,6 +605,10 @@ const runBoardAnalysis = async (scope: BoardSource): Promise<void> => {
             新闻源设置
           </BaseButton>
         </template>
+        <BaseButton variant="ghost" data-track="HOT_BOARD_TAB_SETTINGS" @click="tabSettingsOpen = true">
+          <MenuIcon name="settings" :size="14" />
+          页签设置
+        </BaseButton>
       </div>
     </Teleport>
 
