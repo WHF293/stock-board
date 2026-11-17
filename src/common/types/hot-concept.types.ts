@@ -66,3 +66,67 @@ export interface HotConceptDay {
   /** 当日热点事件列表（顺序即二级页 index 参数） */
   eventList: HotConceptEvent[];
 }
+
+/* ---------------------------------- 详情接口 ---------------------------------- */
+
+/**
+ * 热点事件详情（event/detail 返回，题材解读数据源）
+ *
+ * 数据源：/app/concept_v2_api/open/api/concept/event/jtcsm/v1/event/detail?eventId=
+ */
+export interface HotConceptEventDetail {
+  /** 事件 id */
+  eventId: string;
+  /** 事件标题（与清单 title 同值） */
+  title: string | null;
+  /** 创建时间（Unix 秒） */
+  createTime: number | null;
+  /** 题材解读全文（\n 分段） */
+  summary: string;
+  /** 题材解读逐条摘要（上游已切分） */
+  summaryItems: string[];
+  /** 原文链接（「详情」外链） */
+  jumpUrl: string | null;
+  /** 关联题材列表 */
+  themes: HotConceptTheme[];
+  /** 是否已封顶 */
+  hasTopped: boolean | null;
+  /** 投资方向（一句话口径） */
+  investmentDirection: string;
+  /** 关联深度专题（未启用，恒 null） */
+  relatedDeepTopic: unknown | null;
+}
+
+/** 带行情的题材板块（theme/table 返回项；细分概念在 children 中递归同构） */
+export interface HotConceptThemeBoard extends HotConceptTheme {
+  /** 板块实时涨幅（百分数数值） */
+  risePercent: number | null;
+  /** 板块涨停家数（细分概念为 null） */
+  limitUpCount: number | null;
+  /** 板块成分股（细分概念的领涨股集合；顶层可为 null，成分取 children 汇总） */
+  topStocks: HotConceptTopStock[] | null;
+  /** 细分概念（type = concept-subdivision，可为 null） */
+  children: HotConceptThemeBoard[] | null;
+}
+
+/** 事件级行情（event/quote 返回项；平均涨幅 + 涨停家数） */
+export interface HotConceptEventQuote {
+  /** 事件 id */
+  eventId: string;
+  /** 事件平均涨幅（百分数数值） */
+  risePercent: number | null;
+  /** 涨停家数 */
+  limitUpCount: number | null;
+}
+
+/** 板块实时涨幅（theme/quote/increase 返回项） */
+export interface HotConceptThemeIncrease {
+  /** 题材 id */
+  id: string;
+  /** 题材类型（concept） */
+  type: string;
+  /** 板块实时涨幅（百分数数值） */
+  risePercent: number | null;
+  /** 涨停家数（可为 null） */
+  limitUpCount: number | null;
+}
