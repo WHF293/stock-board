@@ -174,15 +174,26 @@ const onNewChat = (): void => {
       <div class="min-h-0 flex-1 overflow-y-auto px-3 pb-3 pt-3">
         <div class="flex items-center justify-between px-1.5 pb-1">
           <p class="text-xs font-medium text-text-tertiary">会话</p>
-          <button
-            type="button"
-            class="pressable rounded p-1 text-text-tertiary transition-colors hover:bg-flat-weak hover:text-text"
-            title="新建分组"
-            aria-label="新建分组"
-            @click="sessionTreeRef?.openNewGroup()"
-          >
-            <MenuIcon name="plus" :size="12" />
-          </button>
+          <div class="flex items-center gap-0.5">
+            <button
+              type="button"
+              class="pressable rounded p-1 text-text-tertiary transition-colors hover:bg-flat-weak hover:text-up"
+              title="批量删除会话"
+              aria-label="批量删除会话"
+              @click="sessionTreeRef?.toggleBatchMode()"
+            >
+              <MenuIcon name="trash" :size="12" />
+            </button>
+            <button
+              type="button"
+              class="pressable rounded p-1 text-text-tertiary transition-colors hover:bg-flat-weak hover:text-text"
+              title="新建分组"
+              aria-label="新建分组"
+              @click="sessionTreeRef?.openNewGroup()"
+            >
+              <MenuIcon name="plus" :size="12" />
+            </button>
+          </div>
         </div>
         <SessionTree ref="sessionTreeRef" />
       </div>

@@ -237,6 +237,22 @@ export const useAgentStore = defineStore('agent', () => {
   }
 
   /**
+   * 批量删除会话（级联删消息；若含当前会话则回退到剩余列表首个）
+   * @param ids 待删除的会话 id 列表
+   */
+  async function removeSessions(ids: number[]): Promise<void> {
+    if (ids.length === 0) return;
+    const idSet = new Set(ids);
+    for (const id of idSet) {
+      await db.deleteSession(id);
+    }
+    sessions.value = sessions.value.filter((s) => !idSet.has(s.id));
+    if (currentSessionId.value !== null && idSet.has(currentSessionId.value)) {
+      currentSessionId.value = sessions.value[0]?.id ?? null;
+    }
+  }
+
+  /**
    * 移动会话到分组（⋯ 菜单「移动分组」入口；拖拽走 applySessionOrders）
    * @param id 会话 id
    * @param groupId 目标分组 id，null = 未分组
@@ -575,6 +591,7 @@ export const useAgentStore = defineStore('agent', () => {
     renameSession,
     setSessionModel,
     removeSession,
+    removeSessions,
     togglePin,
     moveSessionToGroup,
     applySessionOrders,
