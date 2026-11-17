@@ -144,6 +144,17 @@ export const getTzzbHoldingLastTradeDateFromDb = async (
 };
 
 /**
+ * 清空某账户范围的持仓回放流水（结构性重建用：拉取口径如起始日变更后旧缓存
+ * 缺段，整段清除由全量拉取重建——该表是可重建缓存，非用户数据）
+ * @param scope 账户范围口径 key
+ */
+export const clearTzzbHoldingTradesScope = async (scope: string): Promise<void> => {
+  const db = await getTzzbHoldingDb();
+  if (!db) return;
+  await db.execute('DELETE FROM tzzb_holding_trade WHERE scope = $1', [scope]);
+};
+
+/**
  * 增量合并流水入某账户范围（INSERT OR IGNORE：唯一约束八元组去重，
  * 边界日整日重拉的既有行不重复入库）
  * @param scope 账户范围口径 key

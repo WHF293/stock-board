@@ -38,7 +38,7 @@ import {
 import { fetchFullQuotes } from '../../../../common/api/quotes.api.ts';
 import { usePolling } from '../../../../common/composables/use-polling';
 import { POLLING_INTERVAL } from '../../../../common/constants/polling.constants.ts';
-import { buildTzzbHoldingSummary } from '../../../../common/utils/build-tzzb-holding-summary';
+import { buildTzzbHoldingSummary, buildTzzbPhantomCodes } from '../../../../common/utils/build-tzzb-holding-summary';
 import { replayTzzbHoldings } from '../../../../common/utils/replay-tzzb-holdings';
 import {
   fetchTzzbScopeSnapshot,
@@ -439,28 +439,23 @@ const holdingReplay = computed(() =>
   holdingTrades.value === null ? null : replayTzzbHoldings(holdingTrades.value),
 );
 
-/** 持仓与当日盈亏推算汇总（流水 / 行情任一更新即重算；回放结果复用上方缓存）
+/** 已清仓幽灵标的（清仓记录 × 流水最后一笔买入日交叉，见 buildTzzbPhantomCodes）
  *
- * 权威锚定：清算快照（queryStockPosition.holdings）已覆盖流水的标的重置为
- * 券商数量，快照判已清仓且当日无成交的幽灵持仓剔除（流水缺口残留，2026-11-17）；
- * 快照未拉到（position 为 null）或截止日早于标的最新成交日时回落纯回放 */
+ * 背景：上游流水缺卖出记录且重拉无法补齐（实测电池ETF清仓后回放残留 700 股），
+ * 而清算快照 holdings 与流水/当日盈亏工具互相矛盾不可信——改用清仓记录交叉剔除 */
+const phantomCodes = computed(() =>
+  holdingTrades.value === null ? new Set<string>() : buildTzzbPhantomCodes(holdingTrades.value, cleared.value),
+);
+
+/** 持仓与当日盈亏推算汇总（流水 / 行情任一更新即重算；回放结果复用上方缓存） */
 const holdingSummary = computed(() => {
   if (holdingTrades.value === null || holdingReplay.value === null) return null;
-  const positionSnapshot = position.value;
-  // 兼容旧口径缓存快照（holdings 字段缺席 = 锚定不可用，回落纯回放）
-  const anchor =
-    positionSnapshot && Array.isArray(positionSnapshot.holdings) && syncMeta.value?.dataDate
-      ? {
-          holdings: new Map(positionSnapshot.holdings.map((h) => [h.code, h])),
-          dataDate: syncMeta.value.dataDate,
-        }
-      : undefined;
   return buildTzzbHoldingSummary(
     holdingTrades.value,
     holdingQuotes.value,
     dayjs().format('YYYY-MM-DD'),
     holdingReplay.value,
-    anchor,
+    phantomCodes.value,
   );
 });
 
@@ -472,6 +467,30 @@ const holdingLiveReady = computed(
     Object.keys(holdingQuotes.value).length > 0 &&
     focusKind.value !== 'fund',
 );
+
+/**
+ * 指标行持仓市值的展示口径（2026-11-18 起）
+ *
+ * 优先实时推算（与「当前持仓」面板同源：流水回放 × 实时行情）——上游
+ * queryStockPosition 的 totalMarketValue / positionRatio 与投资账本 App 页面
+ * 实测不一致（快照持仓明细与流水/当日盈亏工具互相矛盾），App 口径 14.8% ≈
+ * 推算市值 / 总资产；实时未就绪回落清算快照原值
+ */
+const liveMarketValue = computed(() => {
+  if (holdingLiveReady.value && holdingSummary.value !== null) {
+    return holdingSummary.value.marketValue;
+  }
+  return position.value?.marketValue ?? 0;
+});
+
+/** 指标行仓位 = 持仓市值 / 总资产（实时口径优先，总资产沿用清算快照） */
+const livePositionRatio = computed(() => {
+  const totalAsset = position.value?.totalAsset ?? 0;
+  if (holdingLiveReady.value && totalAsset > 0) {
+    return liveMarketValue.value / totalAsset;
+  }
+  return position.value?.positionRatio ?? 0;
+});
 
 /**
  * 拉取当前持仓 ∪ 当日成交标的的实时行情（轮询任务；无持仓静默跳过）
@@ -1354,9 +1373,9 @@ const openStockDetailPage = (code: string): void => {
       <!-- ① 指标行（当日盈亏优先实时推算，未就绪回落清算口径；区间盈亏 / 对比沪深300 跟随资产曲线区间） -->
       <TzzbMetricRow
         :total-asset="position?.totalAsset ?? 0"
-        :market-value="position?.marketValue ?? 0"
+        :market-value="liveMarketValue"
         :available-funds="position?.availableFunds ?? 0"
-        :position-ratio="position?.positionRatio ?? 0"
+        :position-ratio="livePositionRatio"
         :daily-profit="holdingLiveReady ? (holdingSummary?.dayPnl ?? 0) : (lastPoint?.dailyProfit ?? 0)"
         :daily-rate="holdingLiveReady ? (holdingSummary?.dayRate ?? null) : (lastPoint?.dailyRate ?? null)"
         :daily-source="holdingLiveReady ? 'live' : 'cleared'"
