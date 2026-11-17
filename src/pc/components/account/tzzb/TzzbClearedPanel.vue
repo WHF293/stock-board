@@ -4,11 +4,14 @@ import BaseEmpty from '../../ui/BaseEmpty.vue';
 import BaseTable from '../../ui/BaseTable.vue';
 import type { TableColumn } from '../../../../common/types/table.types.ts';
 import type { TzzbClearedPosition } from '../../../../common/types/tzzb.types.ts';
+import { sortTzzbClearedDesc } from '../../../../common/utils/sort-tzzb-cleared-desc';
 
 /**
  * 投资账本 · 建清仓记录（queryClearedPosition，完整买卖回合按股票分组）
  *
- * 持有中行清仓日列高亮；总盈亏 / 收益率涨跌着色；表头可排序
+ * 持有中行清仓日列高亮；总盈亏 / 收益率涨跌着色；表头可排序；
+ * 默认按最新事件日期降序（最新记录在最上面，2026-11-17 王总指定）；
+ * 持有中行的无数据列（均卖 / 总盈亏 / 收益率）显示 —（2026-11-17 王总指定）
  */
 const props = defineProps<{
   /** 清仓记录 */
@@ -59,21 +62,50 @@ const columns: TableColumn<TzzbClearedPosition>[] = [
   { key: 'rate', label: '收益率', align: 'right', sortable: true, sortValue: (r) => r.rate },
 ];
 
+/** 展示行（上游原始顺序 → 最新事件日期降序，不改入参数组） */
+const sortedRows = computed(() => sortTzzbClearedDesc(props.rows));
+
 /** 已清仓笔数（副标题） */
 const clearedCount = computed(() => props.rows.filter((r) => r.closeDate).length);
+
+/**
+ * 持有中行的总盈亏展示：上游对持有中回合通常无实现盈亏（0 占位），显示 —
+ * @param row 单行记录
+ * @returns 盈亏文案（无数据为 —）
+ */
+const profitText = (row: TzzbClearedPosition): string =>
+  row.closeDate === null && row.profit === 0 ? '—' : signYuan(row.profit);
+
+/**
+ * 持有中行的收益率展示：与总盈亏同口径（0 占位显示 —）
+ * @param row 单行记录
+ * @returns 收益率文案（无数据为 —）
+ */
+const rateText = (row: TzzbClearedPosition): string =>
+  row.closeDate === null && row.rate === 0 ? '—' : `${(row.rate * 100).toFixed(2)}%`;
+
+/**
+ * 总盈亏 / 收益率文本色（持有中无数据行不着色）
+ * @param row 单行记录
+ * @returns 涨跌语义色类
+ */
+const rowPlClass = (row: TzzbClearedPosition): string =>
+  row.closeDate === null && row.profit === 0 && row.rate === 0
+    ? 'text-flat'
+    : plClass(row.profit);
 </script>
 
 <template>
   <BaseTable
-    v-if="rows.length > 0"
+    v-if="sortedRows.length > 0"
     :columns="columns"
-    :rows="rows"
+    :rows="sortedRows"
     :row-key="(r) => `${r.code}-${r.openDate}`"
     :min-width="'860px'"
     :scroll-class="fill ? 'table-scroll-fill' : 'table-scroll'"
     row-clickable
     enable-dblclick-nav
-    :footer-text="`共 ${rows.length} 条（已清仓 ${clearedCount} · 持有中 ${rows.length - clearedCount}）· 单击开侧栏 / 双击进详情`"
+    :footer-text="`共 ${sortedRows.length} 条（已清仓 ${clearedCount} · 持有中 ${sortedRows.length - clearedCount}）· 单击开侧栏 / 双击进详情`"
     @row-click="(r) => emit('open', r.code)"
     @row-dblclick="(r) => emit('openPage', r.code)"
   >
@@ -89,13 +121,13 @@ const clearedCount = computed(() => props.rows.filter((r) => r.closeDate).length
       <span class="font-mono">{{ row.avgSell ?? '—' }}</span>
     </template>
     <template #profit="{ row }">
-      <span class="font-mono font-medium tabular-nums" :class="plClass(row.profit)">
-        {{ signYuan(row.profit) }}
+      <span class="font-mono font-medium tabular-nums" :class="rowPlClass(row)">
+        {{ profitText(row) }}
       </span>
     </template>
     <template #rate="{ row }">
-      <span class="font-mono tabular-nums" :class="plClass(row.rate)">
-        {{ (row.rate * 100).toFixed(2) }}%
+      <span class="font-mono tabular-nums" :class="rowPlClass(row)">
+        {{ rateText(row) }}
       </span>
     </template>
   </BaseTable>
