@@ -6,7 +6,6 @@ import BoardDataSyncMenu from '../components/business/BoardDataSyncMenu.vue';
 import BoardFilterModal from '../components/business/BoardFilterModal.vue';
 import BoardMainlinePanel from '../components/business/BoardMainlinePanel.vue';
 import BoardRotationPanel from '../components/business/BoardRotationPanel.vue';
-import PanoramaLeadersBoard from '../components/business/PanoramaLeadersBoard.vue';
 import BaseButton from '../components/ui/BaseButton.vue';
 import BaseCard from '../components/ui/BaseCard.vue';
 import BaseEmpty from '../components/ui/BaseEmpty.vue';
@@ -43,7 +42,6 @@ import {
   ROTATION_TOP_N,
 } from '../../common/constants/board-rotation.constants.ts';
 import { HOST_HEADER_ITEM } from '../../common/constants/header.constants.ts';
-import { LEADER_KIND } from '../../common/constants/industry-leaders.constants.ts';
 import { NOTIFY_TONE } from '../../common/constants/notify.constants.ts';
 import { DATA_CACHE_KEY } from '../../common/constants/data-cache.constants.ts';
 import { POLLING_INTERVAL } from '../../common/constants/polling.constants.ts';
@@ -139,28 +137,10 @@ const legendOpen = ref(false);
 
 /** 页头动作挂载守卫：只有本页激活时按钮才出现在页头（KeepAlive 缓存页切走不残留） */
 const { active: headerSlotActive } = usePageHeaderSlot();
-/** 主区视图：题材轮动（bump 图，默认）/ 板块日历（涨跌停矩阵）/ 板块龙头 / 题材龙头（2026-11-17 新增） */
+/** 主区视图：题材轮动（bump 图，默认）/ 板块日历（涨跌停矩阵）
+ *  （板块龙头 / 题材龙头页签已于 2026-11-18 移入「今天炒什么」页） */
 const calendarView = ref<BoardCalendarViewMode>(BOARD_CALENDAR_VIEW_DEFAULT);
 
-/** 当前是否在龙头视图（板块龙头 / 题材龙头；页头按钮与控制条分支用） */
-const isLeadersView = computed(
-  () =>
-    calendarView.value === BOARD_CALENDAR_VIEW.LEADERS_BOARD ||
-    calendarView.value === BOARD_CALENDAR_VIEW.LEADERS_SEGMENT,
-);
-
-/** 龙头视图 → 外部维度（板块龙头 = 板块 / 题材龙头 = 细分赛道） */
-const leadersKind = computed(() =>
-  calendarView.value === BOARD_CALENDAR_VIEW.LEADERS_SEGMENT
-    ? LEADER_KIND.SEGMENT
-    : LEADER_KIND.BOARD,
-);
-
-/** 龙头面板实例（调用其暴露的 refresh / loading，页头刷新按钮用） */
-const leadersBoardRef = ref<InstanceType<typeof PanoramaLeadersBoard> | null>(null);
-
-/** 龙头页头刷新按钮拉取中（读面板暴露的 loading） */
-const leadersRefreshing = computed(() => leadersBoardRef.value?.loading ?? false);
 /**
  * 题材轮动展示范围（近 10/20/30 日，双向绑定给 BoardRotationPanel；同时驱动
  * 板块Top 子模块日期列、跷跷板右轴窗口与「板块历史得分」停靠面板——
@@ -929,17 +909,7 @@ const legendSwatchStyle = (bucket: BoardScoreBucket): Record<string, string> => 
     <!-- 板块过滤器 + AI 分析上移 MainLayout 页头（Teleport 投射，本页激活时才挂载；弹窗仍留在页内） -->
     <Teleport v-if="headerSlotActive" :to="PAGE_HEADER_ACTIONS_TARGET">
       <div class="flex items-center gap-3">
-        <!-- 龙头视图：页头刷新 = 重拉龙头报价（板块日历的采集刷新不适用于龙头清单） -->
-        <BaseButton
-          v-if="isLeadersView"
-          variant="ghost"
-          :disabled="leadersRefreshing"
-          @click="leadersBoardRef?.refresh()"
-        >
-          <MenuIcon name="refresh" :size="14" :class="{ 'animate-spin': leadersRefreshing }" />
-          {{ leadersRefreshing ? '刷新中…' : '刷新' }}
-        </BaseButton>
-        <BaseButton v-if="!isLeadersView" variant="ghost" @click="filterOpen = true">
+        <BaseButton variant="ghost" @click="filterOpen = true">
           <MenuIcon name="filter" :size="14" />
           板块过滤器
           <span class="tabular-nums text-text-tertiary">
@@ -947,7 +917,7 @@ const legendSwatchStyle = (bucket: BoardScoreBucket): Record<string, string> => 
           </span>
         </BaseButton>
         <BaseButton
-          v-if="agentEntryVisible && !isLeadersView"
+          v-if="agentEntryVisible"
           variant="ghost"
           :disabled="aiRunning"
           @click="runAiAnalysis"
@@ -957,11 +927,10 @@ const legendSwatchStyle = (bucket: BoardScoreBucket): Record<string, string> => 
         </BaseButton>
       </div>
     </Teleport>
-    <!-- 视图页签行（参考行情全景：underline 页签独立成行，右侧状态与刷新；
-         龙头视图无采集状态，更新时间 / 刷新按钮隐藏） -->
+    <!-- 视图页签行（参考行情全景：underline 页签独立成行，右侧状态与刷新） -->
     <div class="flex shrink-0 items-center justify-between gap-2">
       <BaseTabs v-model="calendarView" :options="BOARD_CALENDAR_VIEW_OPTIONS" variant="underline" />
-      <div v-if="!isLeadersView" class="flex items-center gap-2">
+      <div class="flex items-center gap-2">
         <span class="text-xs text-text-tertiary">
           <template v-if="lastUpdatedAt">更新于 {{ formatRelativeTime(lastUpdatedAt) }} · </template>
           {{ tradingDayLabel }} · {{ rangeLabel }}
@@ -1135,15 +1104,7 @@ const legendSwatchStyle = (bucket: BoardScoreBucket): Record<string, string> => 
       </div>
     </template>
 
-    <!-- 板块龙头 / 题材龙头（2026-11-17 王总指定：龙头入口从市场总览页头移入本页；
-         维度由 tab 决定经 fixedKind 传入，报价 / 轮询 / 拖拽排序均由 PanoramaLeadersBoard 自管；
-         布局按钮组（横向 / 竖向滑动）在面板控制行内） -->
-    <PanoramaLeadersBoard
-      v-else-if="isLeadersView"
-      ref="leadersBoardRef"
-      :fixed-kind="leadersKind"
-      class="min-h-0 flex-1"
-    />
+    <!-- 板块龙头 / 题材龙头已于 2026-11-18 王总指定移入「今天炒什么」页页签 -->
 
     <!-- 赚钱效应气泡图已迁入右侧停靠面板（2026-10-31 王总指定删除主区 tab）：
          入口 = 板块日历扩展行「赚钱效应」，经 dockPanel.openProfitBubble 打开 -->

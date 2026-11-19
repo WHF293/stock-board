@@ -6,18 +6,22 @@
  * 分组定义同时被页面与放大弹窗消费，故抽到本文件共享
  * （`<script setup>` 内不能 export，SFC 之间无法互相导入类型与常量）；
  * 「今天题材」（原「市场热点」，2026-11-17 王总指定更名）与「热点新闻」（同日自侧栏并入，
- * 整页复用 HotNewsView 组件）也经本文件的模式类型路由
+ * 整页复用 HotNewsView 组件）也经本文件的模式类型路由；
+ * 板块龙头 / 题材龙头（2026-11-18 王总指定自「板块题材」页 tab 移入）同样按模式路由，
+ * 维度映射到 PanoramaLeadersBoard 的 fixedKind
  */
 
 /** 热股平台（设置弹窗里可勾选 / 拖拽排序的粒度，即卡片粒度） */
 export type BoardSource = 'ths' | 'em' | 'cls' | 'tdx' | 'xq';
 
-/** 今天炒什么页的视图模式（'stock' = 股票热榜 / 'news' = 热点新闻 / 'etf' = ETF 热榜 / 'concept' = 今天题材） */
-export type HotBoardMode = 'stock' | 'news' | 'etf' | 'concept';
+/** 今天炒什么页的视图模式（'stock' = 股票热榜 / 'news' = 热点新闻 / 'etf' = ETF 热榜 / 'concept' = 今天题材 /
+ *  'leaders-board' = 板块龙头 / 'leaders-segment' = 题材龙头，2026-11-18 自板块题材页移入） */
+export type HotBoardMode = 'stock' | 'news' | 'etf' | 'concept' | 'leaders-board' | 'leaders-segment';
 
 /**
  * 视图模式切换 tab 选项（BaseTabs 消费）——
  * 数组顺序 = 默认渲染顺序（2026-11-17 王总指定：今天题材 / 热点新闻 / 股票热榜 / ETF 热榜；
+ * 2026-11-18 王总指定：板块龙头 / 题材龙头自「板块题材」页移入，追加末尾；
  * 实际顺序与显隐以页头「页签设置」为准，见 HotBoardView 的 tabSettings）
  */
 export const HOT_BOARD_MODE_TAB_OPTIONS: readonly { value: HotBoardMode; label: string }[] = [
@@ -25,6 +29,8 @@ export const HOT_BOARD_MODE_TAB_OPTIONS: readonly { value: HotBoardMode; label: 
   { value: 'news', label: '热点新闻' },
   { value: 'stock', label: '股票热榜' },
   { value: 'etf', label: 'ETF 热榜' },
+  { value: 'leaders-board', label: '板块龙头' },
+  { value: 'leaders-segment', label: '题材龙头' },
 ];
 
 /** 分组切换控件的通用选项形态（分组值 + 展示名） */

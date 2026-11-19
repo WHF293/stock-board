@@ -12,6 +12,7 @@ import MarketRankTabSettingsModal from '../components/business/MarketRankTabSett
 import EtfHotBoard from '../components/etf-hot/EtfHotBoard.vue';
 import HotConceptBoard from '../components/hot-concept/HotConceptBoard.vue';
 import HotNewsView from './HotNewsView.vue';
+import PanoramaLeadersBoard from '../components/business/PanoramaLeadersBoard.vue';
 import HotNewsChannelBar from '../components/news/HotNewsChannelBar.vue';
 import { fetchHotBoard } from '../../common/api/hot-board.api.ts';
 import type { HotBoardItem } from '../../common/types/hot-board.types.ts';
@@ -22,6 +23,7 @@ import { useNotificationsStore } from '../../common/stores/notifications';
 import { DATA_CACHE_KEY } from '../../common/constants/data-cache.constants.ts';
 import { HOST_HEADER_ITEM } from '../../common/constants/header.constants.ts';
 import { NOTIFY_TONE } from '../../common/constants/notify.constants.ts';
+import { LEADER_KIND } from '../../common/constants/industry-leaders.constants.ts';
 import { STORAGE_NS_HOT_BOARD_FILTER, STORAGE_NS_HOT_BOARD_MODE, STORAGE_NS_HOT_BOARD_TABS } from '../../common/constants/storage-key.constants.ts';
 import { usePageHeaderSlot, PAGE_HEADER_ACTIONS_TARGET } from '../../common/composables/use-page-header-slot';
 import { ROUTE_PATH } from '../../common/constants/router-meta.constants.ts';
@@ -41,7 +43,7 @@ import { requestAgentAnalysis } from '../agent/agent-bridge';
 import { useSettingsStore } from '../../common/stores/settings';
 
 /**
- * 今天炒什么：热榜聚合页（四模式）
+ * 今天炒什么：热榜聚合页（今天题材 / 热点新闻 / 股票热榜 / ETF 热榜 / 板块龙头 / 题材龙头 六页签）
  *
  * 「今天题材」= 同花顺 hot_concept 最新交易日热点卡片流（卡片本体为热点二级页 iframe，
  * 2026-11-17 王总指定新增，同日由「市场热点」更名并调至首个页签）；
@@ -49,8 +51,10 @@ import { useSettingsStore } from '../../common/stores/settings';
  * 页头「新闻源设置」由本页统一投射）；「股票热榜」= 五平台热股榜单聚合
  * （每平台一张 375px 横向卡片，卡片内 chips 切换分组，A 股口径）；
  * 「ETF 热榜」= 同花顺四 ETF 榜单聚合（热度 / 自选 / 补涨 / T+0，一个榜单单独一列）；
+ * 「板块龙头 / 题材龙头」= 板块 / 细分赛道龙头静态清单卡片流（2026-11-18 王总指定自
+ * 「板块题材」页 tab 移入，复用 PanoramaLeadersBoard，维度经 fixedKind 外控）；
  * 页签顺序 / 显隐由页头「页签设置」控制（盘面雷达同款交互，appStorage 持久化，
- * 默认顺序 今天题材 / 热点新闻 / 股票热榜 / ETF 热榜）；各通道 30 分钟 TTL 缓存
+ * 默认顺序 今天题材 / 热点新闻 / 股票热榜 / ETF 热榜 / 板块龙头 / 题材龙头）；各通道 30 分钟 TTL 缓存
  * 跨页复用；点击榜单行打开个股详情停靠面板；「AI 分析」把当前模式的榜单清单
  * 投递 Agent 窗口；「平台设置」弹窗勾选显隐 + 拖拽排序（草稿模式，仅股票热榜）
  */
@@ -63,7 +67,10 @@ import { useSettingsStore } from '../../common/stores/settings';
  */
 const loadMode = (): HotBoardMode => {
   const raw = appStorage.getItem(STORAGE_NS_HOT_BOARD_MODE);
-  return raw === 'etf' || raw === 'concept' || raw === 'news' || raw === 'stock' ? raw : 'concept';
+  return raw === 'etf' || raw === 'concept' || raw === 'news' || raw === 'stock' ||
+      raw === 'leaders-board' || raw === 'leaders-segment'
+    ? raw
+    : 'concept';
 };
 
 /** 当前视图模式（持久化到 appStorage，下次进入沿用） */
@@ -76,7 +83,8 @@ const mode = ref<HotBoardMode>(loadMode());
 const modeValue = computed({
   get: () => mode.value,
   set: (value: string) => {
-    mode.value = value === 'etf' || value === 'concept' || value === 'news' || value === 'stock'
+    mode.value = value === 'etf' || value === 'concept' || value === 'news' || value === 'stock' ||
+        value === 'leaders-board' || value === 'leaders-segment'
       ? value
       : 'concept';
   },
@@ -87,7 +95,8 @@ watch(mode, (value) => {
 });
 
 // ---------- 页签顺序与显隐（页头「页签设置」弹窗，盘面雷达同款交互；
-// 2026-11-17 王总指定新增：默认顺序 今天题材 / 热点新闻 / 股票热榜 / ETF 热榜） ----------
+// 2026-11-17 王总指定新增：默认顺序 今天题材 / 热点新闻 / 股票热榜 / ETF 热榜；
+// 2026-11-18 王总指定：板块龙头 / 题材龙头自「板块题材」页移入，默认排末尾） ----------
 
 /** 页签设置（顺序 + 显隐；appStorage 持久化） */
 interface HotBoardTabSettings {
@@ -453,6 +462,24 @@ watch(
   { deep: true },
 );
 
+// ---------- 板块龙头 / 题材龙头（2026-11-18 王总指定自「板块题材」页 tab 移入） ----------
+
+/** 当前是否在龙头页签（板块龙头 / 题材龙头；页头刷新按钮与内容区分支用） */
+const isLeadersMode = computed(
+  () => mode.value === 'leaders-board' || mode.value === 'leaders-segment',
+);
+
+/** 龙头页签 → 外部维度（板块龙头 = 板块 / 题材龙头 = 细分赛道），经 fixedKind 外控 */
+const leadersKind = computed(() =>
+  mode.value === 'leaders-segment' ? LEADER_KIND.SEGMENT : LEADER_KIND.BOARD,
+);
+
+/** 龙头面板实例（调用其暴露的 refresh / loading，页头刷新按钮用） */
+const leadersBoardRef = ref<InstanceType<typeof PanoramaLeadersBoard> | null>(null);
+
+/** 龙头页头刷新按钮拉取中（读面板暴露的 loading） */
+const leadersRefreshing = computed(() => leadersBoardRef.value?.loading ?? false);
+
 // ---------- 个股详情面板 ----------
 
 /**
@@ -575,7 +602,7 @@ const runBoardAnalysis = async (scope: BoardSource): Promise<void> => {
   <!-- 单根容器：MainLayout 通过 :class="pageAnim" 下发页面进入动画类名，
          而多根组件无法继承 attrs（会丢动画并刷 Vue warn），故统一包一层；
          高度 h-full 填满 MainLayout 内容容器（定高，2026-10-24 起双滚动条治理），
-         tab 行 shrink-0，四种模式的内容区各撑满剩余高度 -->
+         tab 行 shrink-0，各页签的内容区各撑满剩余高度 -->
   <div class="flex h-full min-h-0 flex-col gap-4">
     <!-- 页级动作上移 MainLayout 页头（2026-11-17 王总指定：页签设置紧贴「插件设置」左侧，
          故排在平台设置 / 新闻源设置之后；order-10 兜底 ETF 模式——本容器需排在
@@ -585,6 +612,16 @@ const runBoardAnalysis = async (scope: BoardSource): Promise<void> => {
          由 EtfHotBoard 自行投射；今天题材模式的刷新在 HotConceptBoard 控制行内 -->
     <Teleport v-if="headerSlotActive" :to="PAGE_HEADER_ACTIONS_TARGET">
       <div class="order-10 flex items-center gap-3">
+        <!-- 龙头页签：页头刷新 = 重拉全部龙头报价 -->
+        <BaseButton
+          v-if="isLeadersMode"
+          variant="ghost"
+          :disabled="leadersRefreshing"
+          @click="leadersBoardRef?.refresh()"
+        >
+          <MenuIcon name="refresh" :size="14" :class="{ 'animate-spin': leadersRefreshing }" />
+          {{ leadersRefreshing ? '刷新中…' : '刷新' }}
+        </BaseButton>
         <template v-if="mode === 'stock'">
           <span class="text-xs text-text-tertiary">
             已启用 {{ visibleSources.length }} / {{ sourceItems.length }} 个平台
@@ -674,6 +711,15 @@ const runBoardAnalysis = async (scope: BoardSource): Promise<void> => {
     <HotConceptBoard v-else-if="mode === 'concept'" class="min-h-0 flex-1" />
 
     <!-- 股票热榜模式：横向卡片流，每平台一张 375px 卡片，超出页面横向滚动（撑满 tab 行以下剩余高度） -->
+    <!-- 板块龙头 / 题材龙头模式（2026-11-18 自「板块题材」页移入）：维度由页签决定经 fixedKind 传入，
+         报价 / 轮询 / 拖拽排序均由 PanoramaLeadersBoard 自管；布局按钮组在面板控制行内 -->
+    <PanoramaLeadersBoard
+      v-else-if="isLeadersMode"
+      ref="leadersBoardRef"
+      :fixed-kind="leadersKind"
+      class="min-h-0 flex-1"
+    />
+
     <div v-else class="flex min-h-0 flex-1 gap-4 overflow-x-auto">
       <HotBoardCard
         v-for="card in cardViews"
