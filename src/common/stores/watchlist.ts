@@ -4,28 +4,37 @@ import { appStorage } from '../utils/app-local-storage';
 import {
   DEFAULT_GROUP_ID,
   DEFAULT_GROUP_NAME,
+  HOLDING_GROUP_ID_CURRENT,
+  HOLDING_GROUP_ID_HISTORY,
+  HOLDING_GROUP_NAME_CURRENT,
+  HOLDING_GROUP_NAME_HISTORY,
   WATCHLIST_DEFAULT_SORT_MODE,
   WATCHLIST_SORT_MODES,
   WATCHLIST_SYMBOL_PATTERN,
 } from '../constants/watchlist.constants.ts';
+import { isProtectedWatchlistGroup } from '../utils/is-protected-watchlist-group';
 import { toFullSymbol } from '../utils/to-full-symbol';
 import { repairWatchlistGroups } from '../utils/repair-watchlist-groups';
 import type { WatchlistGroup, WatchlistSortMode, WatchlistStock } from '../types/watchlist.types.ts';
 
 /** 自选股 store 状态 */
 interface WatchlistState {
-  /** 自选股分组列表（默认组固定在首位） */
+  /** 自选股分组列表（两个账本联动组固定在最前，默认组随后） */
   groups: WatchlistGroup[];
 }
 
 /**
  * 自选股分组 store（localStorage 持久化，刷新不丢失）
  *
- * 股票以 sh600519 完整符号形态入库，展示层直接消费
+ * 股票以 sh600519 完整符号形态入库，展示层直接消费；
+ * 「当前持仓 / 历史持有」两个账本联动组的内容由账户分析本地流水回放驱动
+ * （见 utils/load-tzzb-holding-stocks.ts），用户不可改名、不可手工增删个股
  */
 export const useWatchlistStore = defineStore('watchlist', {
   state: (): WatchlistState => ({
     groups: [
+      { id: HOLDING_GROUP_ID_CURRENT, name: HOLDING_GROUP_NAME_CURRENT, stocks: [] },
+      { id: HOLDING_GROUP_ID_HISTORY, name: HOLDING_GROUP_NAME_HISTORY, stocks: [] },
       { id: DEFAULT_GROUP_ID, name: DEFAULT_GROUP_NAME, stocks: [], sortMode: WATCHLIST_DEFAULT_SORT_MODE },
     ],
   }),
@@ -63,9 +72,12 @@ export const useWatchlistStore = defineStore('watchlist', {
      * 查重只在目标分组内进行，加到别的分组不受影响）
      * @param stock 自选股条目
      * @param groupId 目标分组 id，缺省加入默认组
-     * @returns 是否成功加入（false = 目标分组内已有 / 分组不存在 / 符号非法）
+     * @returns 是否成功加入（false = 目标为受保护分组 / 分组内已有 / 分组不存在 / 符号非法）
      */
     addStock(stock: WatchlistStock, groupId: string = DEFAULT_GROUP_ID): boolean {
+      if (isProtectedWatchlistGroup(groupId)) {
+        return false;
+      }
       const symbol = toFullSymbol(stock.symbol);
       if (!WATCHLIST_SYMBOL_PATTERN.test(symbol)) {
         return false;
@@ -84,11 +96,14 @@ export const useWatchlistStore = defineStore('watchlist', {
     },
 
     /**
-     * 从指定分组移除自选股
+     * 从指定分组移除自选股（受保护分组拒绝：账本联动组内容只随账本刷新）
      * @param groupId 分组 id
      * @param symbol 待移除的股票符号
      */
     removeStock(groupId: string, symbol: string): void {
+      if (isProtectedWatchlistGroup(groupId)) {
+        return;
+      }
       const target = this.groups.find((group) => group.id === groupId);
       if (!target) {
         return;
@@ -98,12 +113,16 @@ export const useWatchlistStore = defineStore('watchlist', {
     },
 
     /**
-     * 拖拽排序：把分组内某位置的股票移动到目标位置（其余条目顺序平移）
+     * 拖拽排序：把分组内某位置的股票移动到目标位置（其余条目顺序平移；
+     * 受保护分组拒绝 —— 内容顺序由账本回放结果决定）
      * @param groupId 分组 id
      * @param fromIndex 拖起条目下标
      * @param toIndex 放置目标下标
      */
     reorderStock(groupId: string, fromIndex: number, toIndex: number): void {
+      if (isProtectedWatchlistGroup(groupId)) {
+        return;
+      }
       const target = this.groups.find((group) => group.id === groupId);
       if (!target) {
         return;
@@ -143,10 +162,13 @@ export const useWatchlistStore = defineStore('watchlist', {
      * @param fromGroupId 源分组 id
      * @param toGroupId 目标分组 id
      * @param symbol 股票符号（sh600519 完整形态）
-     * @returns 是否发生移动（false = 分组不存在 / 同组 / 源组内找不到该票）
+     * @returns 是否发生移动（false = 任一端为受保护分组 / 分组不存在 / 同组 / 源组内找不到该票）
      */
     moveStockToGroup(fromGroupId: string, toGroupId: string, symbol: string): boolean {
       if (fromGroupId === toGroupId) {
+        return false;
+      }
+      if (isProtectedWatchlistGroup(fromGroupId) || isProtectedWatchlistGroup(toGroupId)) {
         return false;
       }
       const from = this.groups.find((group) => group.id === fromGroupId);
@@ -203,14 +225,77 @@ export const useWatchlistStore = defineStore('watchlist', {
     },
 
     /**
-     * 删除自定义分组（默认组受保护不可删除）
+     * 删除自定义分组（受保护分组——默认组与账本联动组——不可删除）
      * @param groupId 分组 id
      */
     removeGroup(groupId: string): void {
-      if (groupId === DEFAULT_GROUP_ID) {
+      if (isProtectedWatchlistGroup(groupId)) {
         return;
       }
       this.groups = this.groups.filter((group) => group.id !== groupId);
+      this.$persist();
+    },
+
+    /**
+     * 重命名自定义分组（受保护分组拒绝：账本联动组名称是产品语义的一部分）
+     * @param groupId 分组 id
+     * @param name 新名称（空白字符串拒绝）
+     * @returns 是否成功（false = 受保护 / 分组不存在 / 名称空白）
+     */
+    renameGroup(groupId: string, name: string): boolean {
+      const trimmed = name.trim();
+      if (trimmed === '' || isProtectedWatchlistGroup(groupId)) {
+        return false;
+      }
+      const target = this.groups.find((group) => group.id === groupId);
+      if (!target) {
+        return false;
+      }
+      target.name = trimmed;
+      this.$persist();
+      return true;
+    },
+
+    /**
+     * 确保两个账本联动分组（当前持仓 / 历史持有）存在，缺失则补插到**最前**
+     *
+     * 触发时机：store 水合后（旧持久化数据没有这两组）、SQLite 镜像以旧备份
+     * 覆盖 store 后、以及导入合并后 —— 用户侧分组顺序只增不减
+     * @returns 是否发生了补插（true 时已自动回写持久化）
+     */
+    ensureHoldingGroups(): boolean {
+      const missing: WatchlistGroup[] = [];
+      if (!this.groups.some((group) => group.id === HOLDING_GROUP_ID_CURRENT)) {
+        missing.push({ id: HOLDING_GROUP_ID_CURRENT, name: HOLDING_GROUP_NAME_CURRENT, stocks: [] });
+      }
+      if (!this.groups.some((group) => group.id === HOLDING_GROUP_ID_HISTORY)) {
+        missing.push({ id: HOLDING_GROUP_ID_HISTORY, name: HOLDING_GROUP_NAME_HISTORY, stocks: [] });
+      }
+      if (missing.length === 0) {
+        return false;
+      }
+      this.groups.unshift(...missing);
+      this.$persist();
+      return true;
+    },
+
+    /**
+     * 用账本流水回放快照整体替换两个联动分组的内容（分组自身字段不动）
+     *
+     * 只被 `loadTzzbHoldingStocks` 的调用方触发；用户手工增删在 store 层就被拦下，
+     * 因此这里是联动分组 stocks 的唯一写入口
+     * @param payload 回放快照
+     * @param payload.current 在持标的（quantity > 归零阈值）
+     * @param payload.history 已清仓标的（quantity 归零）
+     */
+    applyHoldingSnapshot(payload: { current: WatchlistStock[]; history: WatchlistStock[] }): void {
+      const current = this.groups.find((group) => group.id === HOLDING_GROUP_ID_CURRENT);
+      const history = this.groups.find((group) => group.id === HOLDING_GROUP_ID_HISTORY);
+      if (!current || !history) {
+        return;
+      }
+      current.stocks = payload.current.map((stock) => ({ ...stock }));
+      history.stocks = payload.history.map((stock) => ({ ...stock }));
       this.$persist();
     },
 
@@ -231,12 +316,16 @@ export const useWatchlistStore = defineStore('watchlist', {
     },
 
     /**
-     * 一次性从所有分组移除指定股票（弹窗「删除全部」确认后调用）
+     * 一次性从所有分组移除指定股票（弹窗「删除全部」确认后调用；
+     * 受保护分组跳过——账本联动组内容只随账本刷新）
      * @param symbol 待移除的股票符号
      */
     removeStockFromAllGroups(symbol: string): void {
       const normalized = toFullSymbol(symbol);
       for (const group of this.groups) {
+        if (isProtectedWatchlistGroup(group.id)) {
+          continue;
+        }
         const before = group.stocks.length;
         group.stocks = group.stocks.filter((stock) => stock.symbol !== normalized);
         if (group.stocks.length !== before) {
@@ -252,6 +341,7 @@ export const useWatchlistStore = defineStore('watchlist', {
      * 在 `groupIds` 里而组内没有则加入，不在 `groupIds` 里而组内有则移除，
      * 因此「取消勾选」也能生效；传空数组 = 从全部分组移除（等于删自选）。
      * 无论归属是否变化，都保留原有条目的 `addedAt`（只更新名称）。
+     * 受保护分组整体跳过（不增不删：账本联动组内容只随账本刷新）
      * @param stock 自选股条目（用于加入新分组时播种名称）
      * @param groupIds 目标分组 id 列表（勾选结果）
      */
@@ -263,6 +353,9 @@ export const useWatchlistStore = defineStore('watchlist', {
       const wanted = new Set(groupIds);
       let changed = false;
       for (const group of this.groups) {
+        if (isProtectedWatchlistGroup(group.id)) {
+          continue;
+        }
         const index = group.stocks.findIndex((item) => item.symbol === symbol);
         if (wanted.has(group.id)) {
           if (index < 0) {
@@ -319,6 +412,7 @@ export const useWatchlistStore = defineStore('watchlist', {
     if (!this.groups.some((group) => group.id === DEFAULT_GROUP_ID)) {
       this.groups.unshift({ id: DEFAULT_GROUP_ID, name: DEFAULT_GROUP_NAME, stocks: [] });
     }
+    this.ensureHoldingGroups();
     this.$persist();
     return { groupsAdded, stocksAdded };
   },
@@ -342,13 +436,19 @@ export const useWatchlistStore = defineStore('watchlist', {
     // 调试期开启，验证插件确实在读写；生产可移除
     debug: import.meta.env.DEV,
     /**
-     * 水合后清理历史脏数据（签名由 pinia-plugin-persistedstate 提供：
-     * 钩子早于 store 实例被业务代码消费，动作通过 $persist 回写）
+     * 水合后清理历史脏数据 + 补齐账本联动分组（签名由 pinia-plugin-persistedstate
+     * 提供：钩子早于 store 实例被业务代码消费，动作通过 $persist 回写）
      * @param context 持久化上下文（含当前 store 实例）
      */
     afterHydrate: (context) => {
-      const store = context.store as unknown as { repairLoadedGroups: () => boolean };
-      if (store.repairLoadedGroups()) {
+      const store = context.store as unknown as {
+        repairLoadedGroups: () => boolean;
+        ensureHoldingGroups: () => boolean;
+      };
+      // 两个动作都要执行（不能短路）：清洗与补组互不重叠
+      const repaired = store.repairLoadedGroups();
+      const ensured = store.ensureHoldingGroups();
+      if (repaired || ensured) {
         context.store.$persist();
       }
     },

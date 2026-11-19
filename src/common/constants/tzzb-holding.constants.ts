@@ -11,6 +11,9 @@ export const TZZB_TRADE_ACTION_SELL = '卖出';
 /** 回放净数量归零阈值（浮点累加误差容差，低于该值视为已清仓） */
 export const TZZB_HOLDING_QTY_EPS = 1e-4;
 
+/** 账户范围口径 key：全部账户汇总（落库 scope 列与降级缓存 key 后缀共用） */
+export const TZZB_HOLDING_SCOPE_ALL = 'all';
+
 /**
  * 账本数据起始日（yyyyMMdd）
  *

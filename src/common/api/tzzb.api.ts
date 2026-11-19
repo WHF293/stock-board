@@ -5,6 +5,7 @@ import {
 } from '../types/tzzb.types.ts';
 import {
   TZZB_DATA_START_DATE_DASHED,
+  TZZB_HOLDING_SCOPE_ALL,
   TZZB_HOLDING_TRADE_FETCH_CONCURRENCY,
   TZZB_HOLDING_TRADE_PAGE_COUNT,
   TZZB_HOLDING_TRADE_START_DATE,
@@ -857,7 +858,7 @@ export const invalidateTzzbHoldingTradesCache = (): void => {
  * @returns 'all' = 汇总 / 单账户 id / 多选 id 逗号拼接
  */
 const holdingScopeKey = (): string =>
-  scopeAccountIds === null ? 'all' : scopeAccountIds.join(',');
+  scopeAccountIds === null ? TZZB_HOLDING_SCOPE_ALL : scopeAccountIds.join(',');
 
 /**
  * 持仓流水 localStorage 降级缓存 key（浏览器端 SQLite 不可用时用；跟随当前账户范围）
@@ -890,6 +891,26 @@ const writeHoldingTradesLocalCache = (list: TzzbStockTrade[]): void => {
     localStorage.setItem(holdingTradesStoreKey(), JSON.stringify({ list }));
   } catch {
     // localStorage 满或不可用：放弃持久化，内存缓存仍生效
+  }
+};
+
+/**
+ * 读取**指定账户范围**的持仓流水 localStorage 降级缓存（跨页面只读场景用）
+ *
+ * 与 `readHoldingTradesLocalCache` 的区别：那个跟随账户分析页当前选中的范围，
+ * 这个由调用方显式指定 scope（如自选股页的账本联动分组固定读 'all'），
+ * 不会因子模块加载而改动任何模块状态
+ * @param scope 账户范围口径 key（'all' = 汇总 / 单账户 id / 多选 id 逗号拼接）
+ * @returns 缓存的全历史流水；无有效缓存返回 null
+ */
+export const readTzzbHoldingTradesCacheByScope = (scope: string): TzzbStockTrade[] | null => {
+  try {
+    const raw = localStorage.getItem(`${TZZB_HOLDING_TRADES_CACHE_KEY}:${scope}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { list?: TzzbStockTrade[] };
+    return Array.isArray(parsed?.list) && parsed.list.length > 0 ? parsed.list : null;
+  } catch {
+    return null;
   }
 };
 

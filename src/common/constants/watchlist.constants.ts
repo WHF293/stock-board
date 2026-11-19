@@ -10,6 +10,48 @@ export const DEFAULT_GROUP_ID = 'default';
 /** 默认自选分组名称 */
 export const DEFAULT_GROUP_NAME = '默认分组';
 
+/** 账本联动分组 id：当前持仓（内容从本地投资账本流水回放，用户不可改名 / 增删个股） */
+export const HOLDING_GROUP_ID_CURRENT = 'holding-current';
+
+/** 账本联动分组 id：历史持有（已清仓标的，同上） */
+export const HOLDING_GROUP_ID_HISTORY = 'holding-history';
+
+/** 账本联动分组名称：当前持仓 */
+export const HOLDING_GROUP_NAME_CURRENT = '当前持仓';
+
+/** 账本联动分组名称：历史持有 */
+export const HOLDING_GROUP_NAME_HISTORY = '历史持有';
+
+/**
+ * 受保护分组 id 全集（默认组 + 两个账本联动组）
+ *
+ * 保护语义：不可重命名、不可删除、不可手工增删个股（账本联动组的内容只随
+ * 账本流水刷新）；分组设置里仍可拖动位置与勾选显隐
+ */
+export const WATCHLIST_PROTECTED_GROUP_IDS: readonly string[] = [
+  DEFAULT_GROUP_ID,
+  HOLDING_GROUP_ID_CURRENT,
+  HOLDING_GROUP_ID_HISTORY,
+];
+
+/** 账本联动分组空态文案（key 与 HOLDING_GROUP_ID_* 对应；非联动组查不到回落普通文案） */
+export const HOLDING_GROUP_EMPTY_TEXT: Record<string, string> = {
+  [HOLDING_GROUP_ID_CURRENT]: '暂无在持标的\n在「账户分析」同步账本后自动显示',
+  [HOLDING_GROUP_ID_HISTORY]: '暂无已清仓标的\n在「账户分析」同步账本后自动显示',
+};
+
+/** 普通分组空态文案（看板空列引导，与账本联动组空态区分） */
+export const WATCHLIST_GROUP_EMPTY_TEXT = '空分组\n拖拽股票卡片到这里';
+
+/** 账本联动分组刷新失败浮窗文案 */
+export const HOLDING_SNAPSHOT_FAILED_NOTIFY = {
+  title: '持仓分组刷新失败',
+  body: '读取本地账本流水失败，分组内容保持上次结果',
+} as const;
+
+/** 自选股卡片标签圆点提示文案（与盯盘小组件气泡的圆点口径一致） */
+export const WATCHLIST_TAG_DOT_TITLE = '点击切换分类颜色（持仓 / 关注 / 其他）';
+
 /** 自选股表格「分组」列：多个分组名称间的分隔符 */
 export const WATCHLIST_GROUP_NAME_SEPARATOR = '，';
 

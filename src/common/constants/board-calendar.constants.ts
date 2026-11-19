@@ -455,10 +455,6 @@ export const BOARD_CALENDAR_VIEW = {
   BUBBLE: 'bubble',
   MAINLINE: 'mainline',
   SEESAW: 'seesaw',
-  /** 板块龙头（2026-11-17 王总指定：龙头入口从市场总览页头移入本页，板块维度） */
-  LEADERS_BOARD: 'leaders-board',
-  /** 题材龙头（2026-11-17 王总指定：细分赛道维度） */
-  LEADERS_SEGMENT: 'leaders-segment',
 } as const;
 
 /** 主区视图默认值（页面即板块分析页，默认进新视图） */
@@ -472,13 +468,12 @@ export const BOARD_CALENDAR_VIEW_DEFAULT = BOARD_CALENDAR_VIEW.ROTATION;
  * 「赚钱效应」按钮打开），选项随之移除；MAINLINE key 保留（类型与持久化兼容）。
  * 2026-11-03 王总指定：风格跷跷板 Tab 删除，面板并入题材轮动视图下方作子模块
  * （与板块Top 并列，范围档与题材轮动同步），选项随之移除；SEESAW key 保留。
- * 2026-11-17 王总指定：龙头入口从市场总览页头移入本页，新增 板块龙头 / 题材龙头 两个 Tab。
+ * 2026-11-17 曾新增 板块龙头 / 题材龙头 两个 Tab，2026-11-18 王总指定移入
+ * 「今天炒什么」页页签，本页选项与 key 同日移除。
  */
 export const BOARD_CALENDAR_VIEW_OPTIONS = [
   { label: '题材轮动', value: BOARD_CALENDAR_VIEW.ROTATION },
   { label: '板块日历', value: BOARD_CALENDAR_VIEW.LIST },
-  { label: '板块龙头', value: BOARD_CALENDAR_VIEW.LEADERS_BOARD },
-  { label: '题材龙头', value: BOARD_CALENDAR_VIEW.LEADERS_SEGMENT },
 ] as const;
 
 /**

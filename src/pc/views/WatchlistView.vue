@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onActivated, ref } from "vue";
 import BaseButton from "../components/ui/BaseButton.vue";
 import BaseConfirmModal from "../components/ui/BaseConfirmModal.vue";
 import BaseInput from "../components/ui/BaseInput.vue";
@@ -23,9 +23,12 @@ import {
   BATCH_ADD_SKIPPED_TEMPLATE,
   BATCH_ADD_SUCCESS_TEMPLATE,
   DEFAULT_GROUP_ID,
+  HOLDING_SNAPSHOT_FAILED_NOTIFY,
 } from "../../common/constants/watchlist.constants.ts";
 import { STORAGE_NS_WATCHLIST_GROUP_HIDDEN } from "../../common/constants/storage-key.constants.ts";
 import { appStorage } from "../../common/utils/app-local-storage";
+import { isProtectedWatchlistGroup } from "../../common/utils/is-protected-watchlist-group";
+import { loadTzzbHoldingStocks } from "../../common/utils/load-tzzb-holding-stocks";
 import { useWatchlistStore } from "../../common/stores/watchlist";
 import { useNotificationsStore } from "../../common/stores/notifications";
 import { useDataCacheStore } from "../../common/stores/data-cache";
@@ -81,6 +84,35 @@ usePolling({
   tradingAware: true,
 });
 
+// ---------- 账本联动分组（当前持仓 / 历史持有，内容来自账户分析本地流水回放） ----------
+//
+// 2026-11-19 王总指定：两个默认分组的内容只随账本数据更新（全部账户汇总口径），
+// 用户不可改名、不可增删个股（store 层守卫），只可拖动位置与勾选显隐；
+// 页面每次激活时从本地缓存重放一次 —— 只读 SQLite / localStorage 两级缓存，
+// 绝不触发上游同步，想要新数据先到「账户分析」页同步账本
+
+/** 刷新账本联动分组内容（失败时浮窗提示并保持上次结果） */
+const refreshHoldingGroups = async (): Promise<void> => {
+  try {
+    const snapshot = await loadTzzbHoldingStocks();
+    watchlistStore.applyHoldingSnapshot(snapshot);
+  } catch (error) {
+    console.error('[watchlist] holding groups', error);
+    notifyStore.push({
+      title: HOLDING_SNAPSHOT_FAILED_NOTIFY.title,
+      body: HOLDING_SNAPSHOT_FAILED_NOTIFY.body,
+      tone: NOTIFY_TONE.DOWN,
+      source: NOTIFY_SOURCE_WATCHLIST,
+      dedupeKey: 'watchlist-holding-refresh-failed',
+    });
+  }
+};
+
+// KeepAlive 页面：onActivated 首次挂载即触发，回访时重新回放（账户分析页可能刚同步过）
+onActivated(() => {
+  void refreshHoldingGroups();
+});
+
 // ---------- 分组列顺序与显隐（分组设置弹窗，热点新闻源设置同款交互） ----------
 
 /** 隐藏的分组 id 列表（appStorage 持久化；分组删除时顺手清理） */
@@ -93,13 +125,13 @@ const visibleGroups = computed(() =>
   watchlistStore.groups.filter((group) => !hiddenGroupIds.value.includes(group.id)),
 );
 
-/** 分组设置弹窗条目（勾选 + 拖拽草稿的数据源；默认组不可删） */
+/** 分组设置弹窗条目（勾选 + 拖拽草稿的数据源；受保护分组不可删） */
 const groupSettingsItems = computed(() =>
   watchlistStore.groups.map((group) => ({
     value: group.id,
     label: group.name,
     enabled: !hiddenGroupIds.value.includes(group.id),
-    deletable: group.id !== DEFAULT_GROUP_ID,
+    deletable: !isProtectedWatchlistGroup(group.id),
   })),
 );
 
@@ -128,11 +160,11 @@ const showRemoveGroupConfirm = ref(false);
 const pendingRemoveGroupId = ref<string | null>(null);
 
 /**
- * 请求删除分组（默认组禁删；先弹确认窗）
+ * 请求删除分组（受保护分组禁删；先弹确认窗）
  * @param groupId 分组 id
  */
 const onRemoveGroup = (groupId: string): void => {
-  if (groupId === DEFAULT_GROUP_ID) {
+  if (isProtectedWatchlistGroup(groupId)) {
     return;
   }
   pendingRemoveGroupId.value = groupId;
@@ -176,6 +208,41 @@ const onAddGroup = (): void => {
   }
   watchlistStore.addGroup(name);
   createGroupOpen.value = false;
+};
+
+// ---------- 重命名分组（2026-11-19 王总指定：新增分组后名称要能改） ----------
+//
+// 入口在分组列头的铅笔 icon（受保护分组——默认组与账本联动组——不出现入口）；
+// 受保护分组即使误触发也会被 store.renameGroup 拒绝
+
+/** 重命名分组弹窗开关 */
+const renameGroupOpen = ref(false);
+
+/** 待重命名的分组 id（在弹窗回调里消费） */
+const renamingGroupId = ref<string | null>(null);
+
+/** 重命名输入（弹窗打开时预填原名称；最多 8 个字） */
+const renamingName = ref("");
+
+/**
+ * 打开重命名弹窗（预填当前名称）
+ * @param groupId 分组 id
+ */
+const onRenameGroupOpen = (groupId: string): void => {
+  renamingGroupId.value = groupId;
+  renamingName.value =
+    watchlistStore.groups.find((group) => group.id === groupId)?.name ?? "";
+  renameGroupOpen.value = true;
+};
+
+/** 确认重命名（空名由确认按钮禁用兜底） */
+const onConfirmRenameGroup = (): void => {
+  const groupId = renamingGroupId.value;
+  if (!groupId) {
+    return;
+  }
+  watchlistStore.renameGroup(groupId, renamingName.value);
+  renameGroupOpen.value = false;
 };
 
 // ---------- 添加 / 批量添加（2026-10-28 王总指定：入口移到各分组列头，落点 = 点的分组） ----------
@@ -430,6 +497,7 @@ const onConfirmStockGroups = (groupIds: string[]): void => {
       @remove="onRemoveStock"
       @add="onColumnAdd"
       @batch-add="onColumnBatchAdd"
+      @rename="onRenameGroupOpen"
     />
 
     <!-- 页头「分组设置」弹窗（拖拽排序 + 勾选显隐 + 删除入口） -->
@@ -456,6 +524,25 @@ const onConfirmStockGroups = (groupIds: string[]): void => {
       <template #footer>
         <BaseButton variant="ghost" @click="createGroupOpen = false">取消</BaseButton>
         <BaseButton :disabled="newGroupName.trim() === ''" @click="onAddGroup">创建分组</BaseButton>
+      </template>
+    </BaseModal>
+
+    <!-- 重命名分组弹窗（分组列头铅笔触发；受保护分组不出现入口） -->
+    <BaseModal v-model:open="renameGroupOpen" title="重命名分组" max-width-class="max-w-sm">
+      <div class="space-y-2">
+        <BaseInput
+          v-model="renamingName"
+          placeholder="分组名称"
+          maxlength="8"
+          aria-label="分组名称"
+          class="w-full"
+          @keyup.enter="onConfirmRenameGroup"
+        />
+        <p class="text-xs text-text-tertiary">最多 8 个字</p>
+      </div>
+      <template #footer>
+        <BaseButton variant="ghost" @click="renameGroupOpen = false">取消</BaseButton>
+        <BaseButton :disabled="renamingName.trim() === ''" @click="onConfirmRenameGroup">确认</BaseButton>
       </template>
     </BaseModal>
 

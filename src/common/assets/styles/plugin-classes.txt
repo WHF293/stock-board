@@ -355,6 +355,7 @@ plugins/dsh-sidebar-watch/marquee.ts
 plugins/dsh-sidebar-watch/monitor.ts
 plugins/dsh-sidebar-watch/plugin.ts
 plugins/dsh-sidebar-watch/service.ts
+plugins/dsh-sidebar-watch/tags.ts
 plugins/dsh-sidebar-watch/widget/constants.ts
 plugins/dsh-sidebar-watch/widget/mount.ts
 plugins/dsh-sidebar-watch/widget/presenter.ts
