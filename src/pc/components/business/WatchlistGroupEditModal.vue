@@ -1,15 +1,17 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import BaseButton from '../ui/BaseButton.vue';
 import BaseConfirmModal from '../ui/BaseConfirmModal.vue';
 import { useWatchlistStore } from '../../../common/stores/watchlist';
+import { isProtectedWatchlistGroup } from '../../../common/utils/is-protected-watchlist-group';
 import type { WatchlistStock } from '../../../common/types/watchlist.types.ts';
 
 /**
  * 自选股「分组归属」编辑弹窗（自选股表格操作列的编辑按钮触发）
  *
- * 列出**全部分组**并勾选该票当前所在的分组：
- * - 勾上 = 确认后加入该分组；取消勾选 = 确认后从该分组移除（全不勾 = 从全部分组移除）；
+ * 列出**全部可编辑分组**（受保护分组——默认组与账本联动组——不出现，它们
+ * 不可手工增删个股）并勾选该票当前所在的分组：
+ * - 勾上 = 确认后加入该分组；取消勾选 = 确认后从该分组移除（全不勾 = 从全部可编辑分组移除）；
  * - 底部操作栏左侧两个快捷按钮（全选 / 全不选）只作用于**草稿**，同样要点「确认」才落库；
  * - 归属读 `useWatchlistStore().groups`，写入交给宿主（本组件是纯受控组件，
  *   只 emit `confirm(groupIds)`，不直接改 store）。
@@ -30,6 +32,11 @@ const emit = defineEmits<{
 
 const watchlistStore = useWatchlistStore();
 
+/** 可编辑分组列表（受保护分组不出现：不可手工增删个股） */
+const editableGroups = computed(() =>
+  watchlistStore.groups.filter((group) => !isProtectedWatchlistGroup(group.id)),
+);
+
 /** 勾选草稿（打开时按当前归属播种，「确认」前不影响 store） */
 const checkedIds = ref<string[]>([]);
 
@@ -46,9 +53,9 @@ watch(
   { immediate: true },
 );
 
-/** 全选：勾上所有分组（默认分组也在内，它同样是可编辑的归属） */
+/** 全选：勾上所有可编辑分组（受保护分组不在列表内，store 层同样有守卫兜底） */
 const onSelectAll = (): void => {
-  checkedIds.value = watchlistStore.groups.map((group) => group.id);
+  checkedIds.value = editableGroups.value.map((group) => group.id);
 };
 
 /** 全不选：清空勾选（确认后即从全部分组移除） */
@@ -76,7 +83,7 @@ const onConfirm = (): void => {
     </p>
     <div class="space-y-1">
       <label
-        v-for="group in watchlistStore.groups"
+        v-for="group in editableGroups"
         :key="group.id"
         class="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-flat-weak"
       >

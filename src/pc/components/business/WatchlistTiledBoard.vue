@@ -7,12 +7,15 @@ import { pluginKernel } from '../../../common/plugin/index';
 import { useWatchlistStore } from '../../../common/stores/watchlist';
 import { useNotificationsStore } from '../../../common/stores/notifications';
 import {
+  HOLDING_GROUP_EMPTY_TEXT,
   WATCHLIST_DEFAULT_SORT_MODE,
   WATCHLIST_GROUP_DRAG_ANIMATION_MS,
   WATCHLIST_GROUP_DRAG_GROUP,
+  WATCHLIST_GROUP_EMPTY_TEXT,
   WATCHLIST_SORT_MODE_CYCLE,
   WATCHLIST_SORT_MODE_ICON,
   WATCHLIST_SORT_MODE_TITLE,
+  WATCHLIST_TAG_DOT_TITLE,
   WATCH_PLUGIN_ID,
   WATCH_PLUGIN_MISSING_NOTIFY,
 } from '../../../common/constants/watchlist.constants.ts';
@@ -24,7 +27,15 @@ import { formatAmount } from '../../../common/utils/format-amount';
 import { formatPercent, formatPercentUnsigned } from '../../../common/utils/format-percent';
 import { formatPrice } from '../../../common/utils/format-price';
 import { findQuoteBySymbol } from '../../../common/utils/find-quote-by-symbol';
+import { isProtectedWatchlistGroup } from '../../../common/utils/is-protected-watchlist-group';
 import { useStockOpen } from '../../../common/composables/use-stock-open';
+import {
+  WATCH_WIDGET_COLOR_CYCLE,
+  WATCH_WIDGET_COLOR_DEFAULT,
+  WATCH_WIDGET_COLOR_HEX,
+  type WatchWidgetColor,
+} from '../../../pc/plugins/watch-widget/constants.ts';
+import type { StockTagsServiceView } from '../../../common/types/stock-tags.types.ts';
 import type { FullQuote } from '../../../common/types/stock-quote.types.ts';
 import type { WatchlistGroup, WatchlistSortMode, WatchlistStock } from '../../../common/types/watchlist.types.ts';
 import type { RegisteredStockRowAction, StockRowTarget } from '../../../common/types/plugin.types.ts';
@@ -37,7 +48,12 @@ import type { RegisteredStockRowAction, StockRowTarget } from '../../../common/t
  * 卡片可拖拽到别的分组列 = 修改分组归属（同组内拖拽不动作），点击卡片进右侧个股详情侧栏（与表格行点击同一交互）；
  * 列头排序 icon 三态循环（2026-10-28 王总指定）：自定义拖拽顺序 → 涨跌幅升序 → 降序 → 自定义，
  * 2026-11-10 起缺省排序改为降序（涨跌幅从高到低），且每个分组独立持久化记住用户选择的排序模式
- * （随 watchlist store 落盘，刷新不丢）；排序态下禁用拖拽，切回自定义后恢复组内拖拽顺序
+ * （随 watchlist store 落盘，刷新不丢）；排序态下禁用拖拽，切回自定义后恢复组内拖拽顺序。
+ * 2026-11-19 起新增：①列头铅笔重命名自定义分组（受保护分组无入口）；
+ * ②「当前持仓 / 历史持有」两个账本联动分组为受保护分组——无改名 / 添加 / 批量入口、
+ * 卡片无移除按钮、组内与跨列拖拽均被拦下，内容随账户分析本地流水回放刷新；
+ * ③卡片名称前新增个股标签圆点（真身 = 盯盘插件 watch:tags 服务的分类颜色映射，
+ * 与任务栏小组件气泡实时互通），点击循环切色
  */
 const props = defineProps<{
   /** 展示的分组列表（已按分组设置排序并过滤隐藏） */
@@ -55,6 +71,8 @@ const emit = defineEmits<{
   add: [groupId: string];
   /** 点击列头「批量添加」icon（由宿主打开批量弹窗，落点 = 该分组） */
   batchAdd: [groupId: string];
+  /** 点击列头「重命名」icon（由宿主打开重命名弹窗；受保护分组不出现入口） */
+  rename: [groupId: string];
 }>();
 
 const watchlistStore = useWatchlistStore();
@@ -174,6 +192,63 @@ const onWatchClick = (stock: WatchlistStock): void => {
 };
 
 
+// ---------- 个股标签（2026-11-19 王总指定：分组内个股支持设置标签） ----------
+//
+// 标签 = 自选盯盘插件的「候选分类颜色」（行首圆点，白 = 未分类）：插件 2.5.0 起
+// 经 `watch:tags` 服务把响应式映射公开出来，本组件按结构消费——插件未安装 /
+// 停用时取到 undefined，圆点整体不渲染（数据保留在插件侧，重新启用即恢复）。
+// 卡片圆点与任务栏小组件气泡的圆点共用同一份映射，两端改色实时互相同步。
+
+/** 标签服务（revision 纳入依赖：插件启停即时出现 / 消失） */
+const tagsService = computed<StockTagsServiceView | null>(() => {
+  void pluginKernel.revision.value;
+  return pluginKernel.services.consumeAs<StockTagsServiceView>('watch:tags') ?? null;
+});
+
+/**
+ * 某只票当前的标签色名（未设置回落白色，与气泡口径一致）
+ * @param symbol 完整符号
+ * @returns 色名（white / red / orange…）
+ */
+const tagColorOf = (symbol: string): WatchWidgetColor =>
+  // 结构契约里映射值是 string，但插件落库前已校验合法性（非法色名写入即忽略），
+  // 这里收窄回 WatchWidgetColor 是安全的
+  (tagsService.value?.colors.value[symbol] as WatchWidgetColor | undefined)
+  ?? WATCH_WIDGET_COLOR_DEFAULT;
+
+/**
+ * 点击圆点循环切换标签色（白 → 红 → 橙 → 黄 → 蓝 → 绿 → 紫 → 粉，与气泡一致）
+ * @param stock 卡片对应的自选股条目
+ */
+const cycleTagColor = (stock: WatchlistStock): void => {
+  const order = WATCH_WIDGET_COLOR_CYCLE;
+  const current = order.indexOf(tagColorOf(stock.symbol));
+  const next = order[(current + 1) % order.length] ?? WATCH_WIDGET_COLOR_DEFAULT;
+  tagsService.value?.setColor(stock.symbol, next);
+};
+
+// ---------- 受保护分组（默认组 + 账本联动组：不可改名 / 删除 / 手工增删个股） ----------
+//
+// 「当前持仓 / 历史持有」的内容由账户分析本地流水回放驱动（页面激活时刷新），
+// 因此列头不出现重命名 / 添加 / 批量添加入口、卡片不出现移除按钮、
+// 组内禁拖且跨列拖入拖出都被拦下
+
+/**
+ * 分组是否受保护（语义见 watchlist.constants 的 WATCHLIST_PROTECTED_GROUP_IDS）
+ * @param group 分组
+ * @returns 是否受保护
+ */
+const isProtectedGroup = (group: WatchlistGroup): boolean =>
+  isProtectedWatchlistGroup(group.id);
+
+/**
+ * 分组空态文案（账本联动组提示去账户分析同步，普通分组引导拖拽）
+ * @param group 分组
+ * @returns 空态文案
+ */
+const emptyTextOf = (group: WatchlistGroup): string =>
+  HOLDING_GROUP_EMPTY_TEXT[group.id] ?? WATCHLIST_GROUP_EMPTY_TEXT;
+
 // ---------- 拖拽改分组（vue-draggable-plus / Sortable，跨列 = 修改归属） ----------
 //
 // 2026-10-28 起弃用 HTML5 原生 DnD：Tauri 的文件拖入处理器（dragDropEnabled 默认开启）
@@ -184,19 +259,26 @@ const onWatchClick = (stock: WatchlistStock): void => {
 interface DragMovePayload {
   /** 拖入目标容器（挂了 data-group-id） */
   to: HTMLElement;
+  /** 拖出源容器（挂了 data-group-id；Sortable move 事件自带） */
+  from: HTMLElement;
   /** 被拖拽的卡片元素（挂了 data-symbol） */
   dragged: HTMLElement;
 }
 
 /**
- * 跨列拖拽的放行校验（Sortable move 钩子）：同一只票允许同时属于多个分组，
- * 但组内不允许重复 —— 目标列已存在该符号时拦截本次拖入
+ * 跨列拖拽的放行校验（Sortable move 钩子）：
+ * ① 同一只票允许同时属于多个分组，但组内不允许重复 —— 目标列已存在该符号时拦截；
+ * ② 受保护分组（默认组 / 账本联动组）不接受拖入，也不允许从里面拖出
  * @param event Sortable move 事件（结构化子集）
  * @returns true = 放行落列
  */
 const onDragMoveCheck = (event: DragMovePayload): boolean => {
   const symbol = event.dragged?.dataset.symbol ?? '';
   const targetGroupId = event.to?.dataset.groupId ?? '';
+  const sourceGroupId = event.from?.dataset.groupId ?? '';
+  if (isProtectedWatchlistGroup(targetGroupId) || isProtectedWatchlistGroup(sourceGroupId)) {
+    return false;
+  }
   const target = props.groups.find((group) => group.id === targetGroupId);
   return !target?.stocks.some((stock) => stock.symbol === symbol);
 };
@@ -275,6 +357,18 @@ const onStocksReorder = (group: WatchlistGroup, stocks: WatchlistStock[]): void 
           {{ group.name }}（{{ group.stocks.length }}）
         </h2>
         <span class="flex shrink-0 items-center gap-0.5">
+          <!-- 重命名（受保护分组不出现入口：默认组与账本联动组名称不可改） -->
+          <button
+            v-if="!isProtectedGroup(group)"
+            type="button"
+            data-track="WATCHLIST_GROUP_RENAME"
+            class="pressable rounded p-1 text-text-tertiary hover:bg-flat-weak hover:text-text active:scale-90"
+            :title="`重命名分组「${group.name}」`"
+            :aria-label="`重命名分组「${group.name}」`"
+            @click="emit('rename', group.id)"
+          >
+            <MenuIcon name="pencil" :size="14" />
+          </button>
           <button
             type="button"
             data-track="WATCHLIST_GROUP_SORT"
@@ -286,7 +380,9 @@ const onStocksReorder = (group: WatchlistGroup, stocks: WatchlistStock[]): void 
           >
             <MenuIcon :name="WATCHLIST_SORT_MODE_ICON[sortModeOf(group)]" :size="14" />
           </button>
+          <!-- 添加 / 批量添加（账本联动组内容只随账本刷新，不出现入口） -->
           <button
+            v-if="!isProtectedGroup(group)"
             type="button"
             data-track="WATCHLIST_GROUP_ADD"
             class="pressable rounded p-1 text-text-tertiary hover:bg-flat-weak hover:text-text active:scale-90"
@@ -297,6 +393,7 @@ const onStocksReorder = (group: WatchlistGroup, stocks: WatchlistStock[]): void 
             <MenuIcon name="plus" :size="14" />
           </button>
           <button
+            v-if="!isProtectedGroup(group)"
             type="button"
             data-track="WATCHLIST_GROUP_BATCH_ADD"
             class="pressable rounded p-1 text-text-tertiary hover:bg-flat-weak hover:text-text active:scale-90"
@@ -313,7 +410,7 @@ const onStocksReorder = (group: WatchlistGroup, stocks: WatchlistStock[]): void 
            升 / 降序态下禁拖并按涨跌幅展示，恢复自定义后回到拖拽顺序） -->
       <VueDraggable
         :model-value="displayStocks(group)"
-        :disabled="sortModeOf(group) !== 'custom'"
+        :disabled="sortModeOf(group) !== 'custom' || isProtectedGroup(group)"
         tag="div"
         :group="WATCHLIST_GROUP_DRAG_GROUP"
         :animation="WATCHLIST_GROUP_DRAG_ANIMATION_MS"
@@ -333,8 +430,20 @@ const onStocksReorder = (group: WatchlistGroup, stocks: WatchlistStock[]): void 
           @click="onCardClick(stock.symbol, group)"
           @dblclick="onCardDblclick(stock.symbol, group)"
         >
-          <!-- 默认三列：名称 / 现价 / 涨跌幅 -->
+          <!-- 默认三列：标签圆点 / 名称 / 现价 / 涨跌幅 -->
           <div class="flex items-center gap-2">
+            <!-- 标签圆点（真身 = 盯盘插件的候选分类颜色映射，与任务栏气泡实时互通；
+                 插件缺席时不渲染。点击循环切色，@click.stop 不触发卡片单击开侧栏） -->
+            <button
+              v-if="tagsService"
+              type="button"
+              data-track="WATCHLIST_TAG_CYCLE"
+              class="h-2 w-2 shrink-0 cursor-pointer rounded-full border border-flat-weak"
+              :style="{ backgroundColor: WATCH_WIDGET_COLOR_HEX[tagColorOf(stock.symbol)] }"
+              :title="WATCHLIST_TAG_DOT_TITLE"
+              :aria-label="WATCHLIST_TAG_DOT_TITLE"
+              @click.stop="cycleTagColor(stock)"
+            ></button>
             <span class="min-w-0 flex-1 truncate text-sm font-medium text-text">
               {{ findQuote(stock.symbol)?.name ?? stock.name }}
             </span>
@@ -389,6 +498,7 @@ const onStocksReorder = (group: WatchlistGroup, stocks: WatchlistStock[]): void 
                 <MenuIcon name="pencil" :size="13" />
               </button>
               <button
+                v-if="!isProtectedGroup(group)"
                 type="button"
                 data-track="WATCHLIST_REMOVE"
                 class="pressable rounded p-1 text-text-tertiary hover:bg-up-weak hover:text-up active:scale-90"
@@ -422,14 +532,12 @@ const onStocksReorder = (group: WatchlistGroup, stocks: WatchlistStock[]): void 
           </div>
         </div>
 
-        <!-- 空分组引导（参考博主分组看板） -->
+        <!-- 空分组引导（账本联动组提示去账户分析同步，普通分组引导拖拽） -->
         <p
           v-if="group.stocks.length === 0"
-          class="rounded-xl border border-dashed border-flat-weak px-2 py-6 text-center text-xs leading-5 text-text-tertiary"
+          class="whitespace-pre-line rounded-xl border border-dashed border-flat-weak px-2 py-6 text-center text-xs leading-5 text-text-tertiary"
         >
-          空分组
-          <br />
-          拖拽股票卡片到这里
+          {{ emptyTextOf(group) }}
         </p>
       </VueDraggable>
     </BaseCard>

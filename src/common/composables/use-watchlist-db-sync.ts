@@ -61,7 +61,8 @@ export const startWatchlistDbSync = (): void => {
     if (snapshot !== null && snapshot.length > 0) {
       if (!isSameSnapshot(snapshot, store.groups)) {
         store.groups = snapshot;
-        store.$persist();
+        // 旧备份 / 旧版本库里没有账本联动分组：覆盖后补插（ensure 内部会回写持久化）
+        store.ensureHoldingGroups();
       }
     } else if (snapshot !== null && store.groups.length > 0) {
       enqueueSave();
