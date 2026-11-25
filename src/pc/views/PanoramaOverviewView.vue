@@ -12,7 +12,12 @@ import {
   fetchGlobalTechPanorama,
   fetchUsSectorPanorama,
 } from '../../common/api/panorama.api.ts';
-import { PANORAMA_CARDS, PANORAMA_MACRO_GROUPS } from '../../common/constants/panorama.constants.ts';
+import {
+  PANORAMA_CARDS,
+  PANORAMA_GLOBAL_TECH_GROUPS,
+  PANORAMA_MACRO_GROUPS,
+  PANORAMA_US_THEME_FUNDS,
+} from '../../common/constants/panorama.constants.ts';
 import { DATA_CACHE_KEY } from '../../common/constants/data-cache.constants.ts';
 import type { PanoramaItem, PanoramaMacroGroup } from '../../common/types/panorama.types.ts';
 import { getTrendByChangePercent } from '../../common/constants/trend.constants.ts';
@@ -37,7 +42,9 @@ import { PAGE_HEADER_ACTIONS_TARGET, usePageHeaderSlot } from '../../common/comp
  *
  * 美股与全球宏观只展示名称 + 涨跌幅（网格卡片）；进入页面串行错峰拉取一次
  * （不参与轮询）；数据先取内存快照秒出 UI，接口成功后写回快照并刷新；
- * A股全景由 PanoramaCnBoard 自管数据
+ * 2026-11-23 王总指定：接口失败/被限频时不显示空占位图，美股基金（26 主题）/
+ * 国外科技巨头（美/日/韩）/ 全球宏观（分组关键词）清单均为固定配置，失败兜底
+ * 照常渲染名称、涨跌幅 `--`；A股全景由 PanoramaCnBoard 自管数据（同日同口径兜底）
  */
 
 /** 各接口请求间隔（毫秒）：对同一上游串行错峰 */
@@ -85,6 +92,37 @@ const matchKeywords = (items: PanoramaItem[], keywords: readonly string[]): Pano
     return hit ?? { name: keyword, changePercent: null };
   });
 
+// ---------- 接口失败兜底（2026-11-23 王总指定）：三组模块清单均为固定配置，
+// 失败 / 被限频时不显示空占位图，名称全部照常展示、涨跌幅 `--`；兜底数据不写快照 ----------
+
+/**
+ * 美股基金兜底：26 个固定主题名称（涨跌幅 `--`）
+ * @returns 主题条目列表（名称 = 配置主题名，changePercent = null）
+ */
+const fallbackUsBoards = (): PanoramaItem[] =>
+  PANORAMA_US_THEME_FUNDS.map((group) => ({ name: group.label, changePercent: null }));
+
+/**
+ * 国外科技巨头兜底：美/日/韩三组固定标的名称（涨跌幅 `--`）
+ * @returns 分组条目（组顺序与组内顺序 = 配置顺序，changePercent = null）
+ */
+const fallbackGlobalTech = (): PanoramaMacroGroup[] =>
+  PANORAMA_GLOBAL_TECH_GROUPS.map((group) => ({
+    label: group.label,
+    items: group.entries.map((entry) => ({ name: entry.name, changePercent: null })),
+  }));
+
+/**
+ * 全球宏观兜底：分组与关键词全量展示（名称 = 配置关键词，涨跌幅 `--`，
+ * 与 matchKeywords 缺行占位同口径）
+ * @returns 分组条目（组顺序 = 配置顺序，changePercent = null）
+ */
+const fallbackMacro = (): PanoramaMacroGroup[] =>
+  PANORAMA_MACRO_GROUPS.map((group) => ({
+    label: group.label,
+    items: group.keywords.map((keyword) => ({ name: keyword, changePercent: null })),
+  }));
+
 /**
  * 拉取全球宏观（全球指数 → 外盘商品串行错峰，再按配置分组匹配）
  * @returns 分组后的宏观条目（配置的分组全量返回，缺行条目数值 `--`）
@@ -99,16 +137,30 @@ const fetchMacro = async (): Promise<PanoramaMacroGroup[]> => {
   });
 };
 
-/** 拉取美股全景（成功后写快照；供轮询与手动刷新复用） */
+/** 拉取美股全景（成功后写快照；失败时兜底渲染固定 26 主题名称并重抛由调用方记日志） */
 const fetchUsBoards = async (): Promise<void> => {
-  usBoards.value = await fetchUsSectorPanorama();
-  dataCache.set(DATA_CACHE_KEY.PANORAMA_US_BOARDS, usBoards.value);
+  try {
+    usBoards.value = await fetchUsSectorPanorama();
+    dataCache.set(DATA_CACHE_KEY.PANORAMA_US_BOARDS, usBoards.value);
+  } catch (error) {
+    if (usBoards.value.length === 0) {
+      usBoards.value = fallbackUsBoards();
+    }
+    throw error;
+  }
 };
 
-/** 拉取国外科技巨头（成功后写快照；与美股基金主题同一 ulist 通道） */
+/** 拉取国外科技巨头（成功后写快照；失败时兜底渲染固定分组名称并重抛由调用方记日志） */
 const fetchGlobalTech = async (): Promise<void> => {
-  globalTech.value = await fetchGlobalTechPanorama();
-  dataCache.set(DATA_CACHE_KEY.PANORAMA_GLOBAL_TECH, globalTech.value);
+  try {
+    globalTech.value = await fetchGlobalTechPanorama();
+    dataCache.set(DATA_CACHE_KEY.PANORAMA_GLOBAL_TECH, globalTech.value);
+  } catch (error) {
+    if (globalTech.value.length === 0) {
+      globalTech.value = fallbackGlobalTech();
+    }
+    throw error;
+  }
 };
 
 /** 拉取全部宿主自管模块（成功后写快照；美股 → 科技巨头 → 宏观串行错峰，任一失败不清空已有快照） */
@@ -128,8 +180,16 @@ const loadAll = async (): Promise<void> => {
       console.error('[panorama] global tech', error);
     }
     await delay(REQUEST_GAP_MS);
-    macroGroups.value = await fetchMacro();
-    dataCache.set(DATA_CACHE_KEY.PANORAMA_MACRO, macroGroups.value);
+    try {
+      macroGroups.value = await fetchMacro();
+      dataCache.set(DATA_CACHE_KEY.PANORAMA_MACRO, macroGroups.value);
+    } catch (error) {
+      // 宏观接口失败兜底（2026-11-23 王总指定）：固定分组 + 关键词全量展示，不显示空占位图
+      if (macroGroups.value.length === 0) {
+        macroGroups.value = fallbackMacro();
+      }
+      console.error('[panorama] macro', error);
+    }
   } catch (error) {
     console.error('[panorama]', error);
     isError.value = true;

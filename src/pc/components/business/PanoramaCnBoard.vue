@@ -21,6 +21,8 @@ import { DATA_CACHE_KEY } from "../../../common/constants/data-cache.constants.t
  * 无筛选排序、无成分股下钻（原 496 行业/概念列表视图已随本改动移除）。
  * 单请求轻接口参与轮询；快照先行秒出，接口返回静默覆盖。
  * 2026-11-03 起按板块池对齐展示：上游缺行的板块名称仍显示、涨跌幅 `--`；
+ * 2026-11-23 王总指定：接口失败/被限频时不显示空占位图，36 个板块为固定池，
+ * 失败兜底也渲染全部板块名称（涨跌幅 `--`）。
  * 卡片支持展开收起（折叠态由宿主持久化）。
  */
 
@@ -65,7 +67,14 @@ const fetchPanorama = async (): Promise<void> => {
         );
         dataCache.set(DATA_CACHE_KEY.CALENDAR_BOARD_PANORAMA, boards.value);
       } catch (error) {
-        isError.value = boards.value.length === 0;
+        // 接口失败兜底（2026-11-23 王总指定）：36 板块为固定池，不显示空占位图，
+        // 名称全部照常展示、涨跌幅 null（渲染 `--`）；兜底数据不写快照，下次成功后静默覆盖
+        if (boards.value.length === 0) {
+          boards.value = CALENDAR_BOARDS.map((board) => ({
+            name: board.name,
+            changePercent: null,
+          }));
+        }
         console.error("[panorama-cn]", error);
       } finally {
         isLoading.value = false;
