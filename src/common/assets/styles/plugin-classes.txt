@@ -248,6 +248,7 @@ mt-4
 mx-auto
 opacity-0
 opacity-100
+opacity-40
 opacity-50
 outline-none
 overflow-hidden
