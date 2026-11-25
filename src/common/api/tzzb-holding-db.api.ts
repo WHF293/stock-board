@@ -126,6 +126,25 @@ export const loadTzzbHoldingTradesFromDb = async (
 };
 
 /**
+ * 读取**全部账户范围**的持仓回放流水（跨 scope 合并，按成交日期 + 入库行序升序）
+ *
+ * 背景（2026-11-25）：落库按账户范围口径分 scope 冗余存储（单账户 / 多选拼接 /
+ * 'all' 各存一份同笔流水），而账户分析页确认过同步账户后 scopeAccountIds 恒非
+ * null——'all' 口径实际从不落库，按 'all' 读的调用方（自选股账本联动分组）永远
+ * 拿到空数据。改为跨 scope 全读后由调用方按唯一约束口径去重合并（见
+ * dedupeHoldingTrades），即得到真正的「全部账户汇总」回放源
+ * @returns 全部 scope 的流水合并；浏览器端（非 Tauri）返回 null（调用方回落 localStorage）
+ */
+export const loadAllScopesTzzbHoldingTradesFromDb = async (): Promise<TzzbStockTrade[] | null> => {
+  const db = await getTzzbHoldingDb();
+  if (!db) return null;
+  const rows = await db.select<Row[]>(
+    'SELECT * FROM tzzb_holding_trade ORDER BY trade_date, id',
+  );
+  return rows.map(toTrade);
+};
+
+/**
  * 读取某账户范围库内最新成交日（增量拉取的起点；边界日整日重拉捕捉同日新增成交）
  * @param scope 账户范围口径 key
  * @returns 最新成交日（YYYY-MM-DD）；无库 / 该口径无数据返回 null

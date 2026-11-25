@@ -895,35 +895,42 @@ const writeHoldingTradesLocalCache = (list: TzzbStockTrade[]): void => {
 };
 
 /**
- * 读取**指定账户范围**的持仓流水 localStorage 降级缓存（跨页面只读场景用）
+ * 读取**全部账户范围**的持仓流水 localStorage 降级缓存（跨页面只读场景用）
  *
- * 与 `readHoldingTradesLocalCache` 的区别：那个跟随账户分析页当前选中的范围，
- * 这个由调用方显式指定 scope（如自选股页的账本联动分组固定读 'all'），
- * 不会因子模块加载而改动任何模块状态
- * @param scope 账户范围口径 key（'all' = 汇总 / 单账户 id / 多选 id 逗号拼接）
- * @returns 缓存的全历史流水；无有效缓存返回 null
+ * 遍历所有 scope 后缀的缓存 key 合并（单账户 / 多选拼接 / 'all' 各存一份同笔
+ * 流水），**返回结果未去重**——scope 间同笔交易冗余，调用方必须再过一遍
+ * `dedupeHoldingTrades`；单个 key 坏数据跳过不影响其余
+ * @returns 全部 scope 缓存流水的合并；无任何有效缓存返回 null
  */
-export const readTzzbHoldingTradesCacheByScope = (scope: string): TzzbStockTrade[] | null => {
-  try {
-    const raw = localStorage.getItem(`${TZZB_HOLDING_TRADES_CACHE_KEY}:${scope}`);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as { list?: TzzbStockTrade[] };
-    return Array.isArray(parsed?.list) && parsed.list.length > 0 ? parsed.list : null;
-  } catch {
-    return null;
+export const readAllScopesTzzbHoldingTradesCache = (): TzzbStockTrade[] | null => {
+  const prefix = `${TZZB_HOLDING_TRADES_CACHE_KEY}:`;
+  const merged: TzzbStockTrade[] = [];
+  for (let i = 0; i < localStorage.length; i += 1) {
+    const key = localStorage.key(i);
+    if (!key || !key.startsWith(prefix)) continue;
+    try {
+      const parsed = JSON.parse(localStorage.getItem(key) ?? '') as { list?: TzzbStockTrade[] };
+      if (Array.isArray(parsed?.list) && parsed.list.length > 0) merged.push(...parsed.list);
+    } catch {
+      /* 单个 key 坏数据：跳过 */
+    }
   }
+  return merged.length > 0 ? merged : null;
 };
 
 /**
- * 流水六元组去重（并行翻页期间上游新增成交会导致页间重复行；
- * 与基金申赎流水去重同思路：日期+代码+操作+价格+数量+金额）
+ * 流水去重（与落库唯一约束同口径：日期+代码+操作+价格+数量+金额+费用合计）
+ *
+ * 两个场景复用：并行翻页期间上游新增成交会导致页间重复行（与基金申赎流水
+ * 去重同思路）；以及跨 scope 合并全量流水时同笔交易在各 scope 下冗余成多行
+ * （自选股账本联动分组的全账户合并回放用）
  * @param list 合并后的流水（页序即入参顺序）
  * @returns 去重后的流水（保持首次出现顺序）
  */
-const dedupeHoldingTrades = (list: TzzbStockTrade[]): TzzbStockTrade[] => {
+export const dedupeHoldingTrades = (list: TzzbStockTrade[]): TzzbStockTrade[] => {
   const seen = new Set<string>();
   return list.filter((t) => {
-    const key = [t.date, t.code, t.action, t.price, t.quantity, t.amount].join('|');
+    const key = [t.date, t.code, t.action, t.price, t.quantity, t.amount, t.feeTotal].join('|');
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
