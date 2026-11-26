@@ -99,16 +99,21 @@ const monthMap = computed(() => {
   return map;
 });
 
-/** 日历网格：周日开头（第一列周日，王总 2026-10-23 口径），含前导空格 */
+/**
+ * 日历网格：仅周一 ~ 周五（周末列整列不显示，王总 2026-11-26 口径），含前导空格
+ */
 const dayCells = computed(() => {
   const y = dayY.value;
   const m = dayM.value;
   const first = dayjs(`${y}-${String(m).padStart(2, '0')}-01`);
-  const lead = first.day(); // dayjs day(): 0 = 周日
+  // 周一为第一列：dayjs day(): 0 = 周日 / 6 = 周六，均落在周末列，前导为 0
+  const lead = first.day() === 0 || first.day() === 6 ? 0 : first.day() - 1;
   const days = first.daysInMonth();
   const cells: { day: number | null; profit?: number; rate?: number }[] = [];
   for (let i = 0; i < lead; i += 1) cells.push({ day: null });
   for (let d = 1; d <= days; d += 1) {
+    const dow = first.date(d).day();
+    if (dow === 0 || dow === 6) continue; // 周末不渲染
     const key = `${y}${String(m).padStart(2, '0')}${String(d).padStart(2, '0')}`;
     const hit = dayMap.value.get(key);
     cells.push({ day: d, profit: hit?.profit, rate: hit?.rate });
@@ -292,8 +297,8 @@ const dayLabel = (date: string): string => `${date.slice(4, 6)}-${date.slice(6, 
           </button>
           <span class="text-xs text-text-tertiary">红涨绿跌 · 空格 = 非交易日 / 无数据</span>
         </div>
-        <div class="grid grid-cols-7 gap-1.5">
-          <span v-for="w in ['日', '一', '二', '三', '四', '五', '六']" :key="w" class="py-1 text-center text-xs text-text-tertiary">
+        <div class="grid grid-cols-5 gap-1.5">
+          <span v-for="w in ['一', '二', '三', '四', '五']" :key="w" class="py-1 text-center text-xs text-text-tertiary">
             {{ w }}
           </span>
           <template v-for="(cell, i) in dayCells" :key="i">

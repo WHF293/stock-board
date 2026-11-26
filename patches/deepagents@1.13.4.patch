@@ -1,0 +1,13 @@
+diff --git a/dist/langsmith-BAO_h4J6.js b/dist/langsmith-BAO_h4J6.js
+index 1fae1ff1ae83f4d3ebf4f1792fc438a44cf95a22..48e6bbb361b51812343df49d6bca8a7cac7e73b2 100644
+--- a/dist/langsmith-BAO_h4J6.js
++++ b/dist/langsmith-BAO_h4J6.js
+@@ -3796,7 +3796,7 @@ function createTaskTool(options) {
+ 	}
+ 	async function runTask(input, config) {
+ 		const { description, subagent_type } = input;
+-		const currentState = getCurrentTaskInput();
++		const currentState = getCurrentTaskInput(config);
+ 		if (currentState[FORKED_CONTEXT_KEY]) return FORK_RECURSION_REFUSAL;
+ 		if (!(subagent_type in subagentGraphs)) {
+ 			const allowedTypes = Object.keys(subagentGraphs).map((k) => `\`${k}\``).join(", ");

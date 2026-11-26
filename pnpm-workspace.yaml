@@ -1,2 +1,4 @@
 packages: []
 hoistPattern: []
+patchedDependencies:
+  deepagents@1.13.4: patches/deepagents@1.13.4.patch
